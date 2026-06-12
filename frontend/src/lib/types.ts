@@ -12,6 +12,16 @@ export interface ContentGenerationRequest {
   additional_instructions?: string;
 }
 
+export interface ContentRegenerateRequest {
+  topic: string;
+  brand_context?: string;
+  tone?: string;
+  target_audience?: string;
+  call_to_action?: string;
+  additional_instructions?: string;
+  regeneration_instructions?: string;
+}
+
 export interface ContentGenerationResponse {
   content_id: number;
   platform: string;
@@ -73,6 +83,7 @@ export interface SocialPostRequest {
   override_title?: string | null;
   override_body?: string | null;
   linkedin_account_labels?: string[];
+  designer_pin?: string | null;
 }
 
 export interface SocialPostResponse {
@@ -194,6 +205,49 @@ export interface AnalyticsSummaryResponse {
   platforms: PlatformAnalyticsResponse[];
 }
 
+// ---------------------------------------------------------------------------
+// Designer Approval Workflow (QA Checker)
+// ---------------------------------------------------------------------------
+
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected';
+
+export interface ApprovalConfig {
+  approval_required: boolean;
+  designer_email_configured: boolean;
+}
+
+export interface ApprovalCreateRequest {
+  content_id: number;
+  platforms: string[];
+  draft_mode?: boolean;
+  override_title?: string | null;
+  override_body?: string | null;
+  linkedin_account_labels?: string[];
+  requested_by?: string | null;
+}
+
+export interface ApprovalRequest {
+  id: number;
+  content_id: number;
+  status: ApprovalStatus | string;
+  platforms?: string[] | null;
+  draft_mode: boolean;
+  override_title?: string | null;
+  override_body?: string | null;
+  linkedin_account_labels?: string[] | null;
+  requested_by?: string | null;
+  reviewer_note?: string | null;
+  results?: SocialPostResponse[] | null;
+  decided_at?: string | null;
+  created_at: string;
+  title?: string | null;
+  body?: string | null;
+  media_path?: string | null;
+  media_type?: string | null;
+  media_url?: string | null;
+  platform?: string | null;
+}
+
 export interface ApiResponse<T> {
   success: boolean;
   data: T;
@@ -284,4 +338,36 @@ export interface RivalInsightsResponse {
   suggestions: RivalInsight[];
   raw?: string | null;
   message?: string | null;
+}
+
+// ============================================
+// Content Creation (chatbot)
+// ============================================
+
+export type ChatRole = 'system' | 'user' | 'assistant';
+
+export interface ChatMessage {
+  role: ChatRole;
+  content: string;
+}
+
+export interface ChatRequest {
+  model: string;
+  messages: { role: ChatRole; content: string }[];
+}
+
+export interface ChatResponse {
+  model: string;
+  reply: string;
+}
+
+export interface CreationModel {
+  id: string;
+  label: string;
+}
+
+export interface CreationModelsResponse {
+  models: CreationModel[];
+  gemini_web_url: string;
+  chat_ready: boolean;
 }

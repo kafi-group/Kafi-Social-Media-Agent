@@ -28,6 +28,7 @@ router = APIRouter()
 
 FACEBOOK_AUTH_URL = "https://www.facebook.com/v21.0/dialog/oauth"
 FACEBOOK_TOKEN_URL = "https://graph.facebook.com/oauth/access_token"
+FACEBOOK_DEBUG_TOKEN_URL = "https://graph.facebook.com/debug_token"
 
 REQUIRED_SCOPES = [
     "pages_show_list",
@@ -39,6 +40,98 @@ REQUIRED_SCOPES = [
     "pages_manage_posts",
     "pages_manage_engagement",
 ]
+
+
+def _debug_token_info(access_token: str) -> dict:
+    """Return Meta debug_token payload for the given token (expiry, type, scopes)."""
+    if not access_token or not settings.FACEBOOK_APP_ID or not settings.FACEBOOK_APP_SECRET:
+        return {}
+    try:
+        resp = requests.get(
+            FACEBOOK_DEBUG_TOKEN_URL,
+            params={
+                "input_token": access_token,
+                "access_token": f"{settings.FACEBOOK_APP_ID}|{settings.FACEBOOK_APP_SECRET}",
+            },
+            timeout=20,
+        )
+        if resp.ok:
+            return resp.json().get("data", {}) or {}
+    except requests.RequestException as exc:
+        logger.warning(f"Meta debug_token failed: {exc}")
+    return {}
+
+
+def _fetch_page_access_token(long_lived_user_token: str, page_id: str) -> tuple[str, str, str]:
+    """
+    Resolve a Page access token from a long-lived user token.
+
+    Returns (token, page_name, note). Page tokens derived from long-lived user
+    tokens do not expire unless app access is revoked.
+    """
+    graph_url = f"https://graph.facebook.com/{settings.META_GRAPH_API_VERSION}"
+    page_id = page_id.strip()
+
+    # Preferred: direct page lookup when FACEBOOK_PAGE_ID is configured.
+    if page_id:
+        try:
+            page_resp = requests.get(
+                f"{graph_url}/{page_id}",
+                params={
+                    "fields": "access_token,name",
+                    "access_token": long_lived_user_token,
+                },
+                timeout=30,
+            )
+            if page_resp.ok:
+                page_data = page_resp.json()
+                token = page_data.get("access_token", "")
+                if token:
+                    return token, page_data.get("name", "your page"), ""
+            logger.warning(f"Direct page token fetch failed: {page_resp.text[:200]}")
+        except requests.RequestException as exc:
+            logger.warning(f"Direct page token fetch error: {exc}")
+
+    # Fallback: list managed pages and match by id.
+    try:
+        accounts_resp = requests.get(
+            f"{graph_url}/me/accounts",
+            params={
+                "fields": "id,name,access_token",
+                "access_token": long_lived_user_token,
+            },
+            timeout=30,
+        )
+        if accounts_resp.ok:
+            for page in accounts_resp.json().get("data", []):
+                if page_id and str(page.get("id")) != page_id:
+                    continue
+                token = page.get("access_token", "")
+                if token:
+                    return token, page.get("name", "your page"), ""
+            if page_id:
+                return (
+                    "",
+                    "",
+                    f"No managed page matched FACEBOOK_PAGE_ID={page_id}. "
+                    "Confirm you are an admin of that page.",
+                )
+    except requests.RequestException as exc:
+        logger.warning(f"me/accounts page token fetch error: {exc}")
+
+    return "", "", "Could not resolve a Page access token from your Facebook login."
+
+
+def _format_expiry(debug_data: dict) -> str:
+    expires_at = debug_data.get("expires_at")
+    if expires_at in (None, 0):
+        return "does not expire (Page token)"
+    try:
+        from datetime import datetime
+
+        return datetime.utcfromtimestamp(int(expires_at)).strftime("%Y-%m-%d %H:%M UTC")
+    except (TypeError, ValueError, OSError):
+        return str(expires_at)
 
 
 @router.get("/auth/meta")
@@ -134,45 +227,36 @@ async def meta_auth_callback(
         )
     long_lived_user_token = ll_resp.json().get("access_token", "")
 
-    # Step 3: Get a never-expiring Page access token
-    graph_url = f"https://graph.facebook.com/{settings.META_GRAPH_API_VERSION}"
-    page_id = settings.FACEBOOK_PAGE_ID.strip()
-
-    page_token = ""
-    page_token_note = ""
-    if page_id and long_lived_user_token:
-        try:
-            page_resp = requests.get(
-                f"{graph_url}/{page_id}",
-                params={
-                    "fields": "access_token,name",
-                    "access_token": long_lived_user_token,
-                },
-                timeout=30,
-            )
-            if page_resp.ok:
-                page_data = page_resp.json()
-                page_token = page_data.get("access_token", "")
-                page_name = page_data.get("name", "your page")
-                page_token_note = f"Page: <strong>{page_name}</strong>"
-            else:
-                logger.warning(f"Could not fetch page token: {page_resp.text[:200]}")
-                page_token_note = (
-                    "Could not auto-fetch page token (check FACEBOOK_PAGE_ID). "
-                    "Use the long-lived user token below instead for now."
-                )
-        except requests.RequestException as exc:
-            logger.warning(f"Page token fetch failed: {exc}")
-            page_token_note = "Page token fetch failed — use long-lived user token below."
+    # Step 3: Get a never-expiring Page access token (required for FB + IG analytics/posting).
+    page_token, page_name, page_token_note = _fetch_page_access_token(
+        long_lived_user_token,
+        settings.FACEBOOK_PAGE_ID,
+    )
 
     if page_token:
         token_to_use = page_token
-        token_label = "Page access token (non-expiring)"
-        token_note = page_token_note
+        token_label = "Page access token (non-expiring — use this)"
+        token_note = (
+            f"Page: <strong>{page_name}</strong>"
+            if page_name
+            else "Page access token resolved successfully."
+        )
+        if page_token_note:
+            token_note += f"<br><span style='color:#b45309'>{page_token_note}</span>"
     else:
         token_to_use = long_lived_user_token
-        token_label = "Long-lived user token (~60 days)"
-        token_note = page_token_note or "Set FACEBOOK_PAGE_ID in .env to get a non-expiring page token."
+        token_label = "Long-lived USER token (~60 days — not ideal)"
+        token_note = (
+            (page_token_note or "Could not fetch a Page token.")
+            + "<br><strong>Set FACEBOOK_PAGE_ID in .env before re-authorizing</strong> "
+            "to receive a non-expiring Page token for Facebook and Instagram."
+        )
+
+    debug_data = _debug_token_info(token_to_use)
+    expiry_text = _format_expiry(debug_data)
+    token_type = debug_data.get("type", "unknown")
+    is_valid = debug_data.get("is_valid", "unknown")
+    scopes = ", ".join(debug_data.get("scopes", []) or [])
 
     return HTMLResponse(
         content=f"""
@@ -180,6 +264,12 @@ async def meta_auth_callback(
           <h2>Meta (Facebook + Instagram) authorization successful</h2>
           <p>{token_note}</p>
           <p><strong>{token_label}</strong></p>
+          <ul>
+            <li>Valid: <strong>{is_valid}</strong></li>
+            <li>Token type: <strong>{token_type}</strong></li>
+            <li>Expires: <strong>{expiry_text}</strong></li>
+          </ul>
+          {f"<p>Scopes: {scopes}</p>" if scopes else ""}
           <p>Copy this value into <code>backend/.env</code> as
           <code>FACEBOOK_PAGE_ACCESS_TOKEN</code>, then restart the backend:</p>
           <pre style="background:#f4f4f4;padding:1rem;overflow:auto;word-break:break-all">{token_to_use}</pre>
@@ -191,9 +281,9 @@ async def meta_auth_callback(
             <li>Facebook and Instagram analytics should work again</li>
           </ol>
           <p style="color:#666;font-size:0.9rem">
-            Keep this token secret. Do not commit it to git. A Page access token
-            derived from a long-lived user token does not expire unless the user
-            revokes app access.
+            Do <strong>not</strong> use tokens from Graph API Explorer for production — they
+            expire in about 1–2 hours. Always use this <code>/api/v1/auth/meta</code> flow and
+            copy the <strong>Page access token</strong> shown above.
           </p>
         </body></html>
         """

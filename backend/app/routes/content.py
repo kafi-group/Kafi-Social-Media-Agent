@@ -9,16 +9,22 @@ PATCH /content/{id}/status - Update content status
 DELETE /content/{id} - Delete content
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
+import asyncio
+import secrets
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, UploadFile, File, Form
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.dependencies import get_db
-from app.database.models import ContentStatus
+from app.database.models import ContentStatus, Content, ApprovalRequest
+from app.middleware.rate_limiter import limiter
 from app.schemas.content import (
     ContentGenerationRequest,
     ContentGenerationResponse,
     ContentHistoryResponse,
     ContentDetailResponse,
+    ContentRegenerateRequest,
     MediaUploadResponse,
     SocialPostRequest,
     SocialPostResponse,
@@ -26,7 +32,9 @@ from app.schemas.content import (
 from app.services.content import ContentService
 from app.services.media import MediaService
 from app.services.publishing import publish_content
+from app.utils.exceptions import ContentGenerationError, LLMConnectionError
 from app.utils.logger import logger
+from app.utils.sanitize import safe_error_detail, validate_media_path
 
 router = APIRouter()
 
@@ -34,9 +42,25 @@ router = APIRouter()
 media_service = MediaService()
 
 
+def _require_internal_key(x_internal_api_key: str = Header(default="")) -> None:
+    """
+    Dependency that enforces the internal API key for destructive endpoints.
+    Raises 403 when the key is missing or invalid.
+    """
+    if not settings.INTERNAL_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="This endpoint is disabled: INTERNAL_API_KEY is not configured.",
+        )
+    if not secrets.compare_digest(x_internal_api_key, settings.INTERNAL_API_KEY):
+        raise HTTPException(status_code=403, detail="Invalid or missing internal API key.")
+
+
 @router.post("/content/generate", response_model=list[ContentGenerationResponse])
+@limiter.limit("10/minute")
 async def generate_content(
-    request: ContentGenerationRequest,
+    request: Request,
+    body: ContentGenerationRequest,
     db: Session = Depends(get_db),
 ):
     """
@@ -44,12 +68,11 @@ async def generate_content(
     The graphic designer provides media separately - this generates text only.
     """
     try:
-        logger.info(f"Received content generation request for platforms: {request.platforms}")
+        logger.info(f"Received content generation request for platforms: {body.platforms}")
 
         service = ContentService(db)
-        generated_contents = service.generate_content(request)
+        generated_contents = service.generate_content(body)
 
-        # Map to response model
         responses = []
         for content in generated_contents:
             responses.append(
@@ -62,8 +85,8 @@ async def generate_content(
                         "hashtags": content["meta_data"].get("hashtags", []),
                         "keywords": content["meta_data"].get("keywords", []),
                         "tone": content["meta_data"].get("tone", "professional"),
-                        "target_audience": request.target_audience,
-                        "call_to_action": request.call_to_action,
+                        "target_audience": body.target_audience,
+                        "call_to_action": body.call_to_action,
                     },
                     status=content["status"],
                     generated_at=content["generated_at"],
@@ -74,11 +97,13 @@ async def generate_content(
 
     except Exception as e:
         logger.error(f"Content generation endpoint error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Content generation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=safe_error_detail(e, "Content generation failed"))
 
 
 @router.post("/content/generate-with-media", response_model=list[ContentGenerationResponse])
+@limiter.limit("10/minute")
 async def generate_content_with_media(
+    request: Request,
     platforms: str = Form(...),
     topic: str = Form(...),
     brand_context: str = Form("Kafi Commodities"),
@@ -169,11 +194,57 @@ async def generate_content_with_media(
 
     except Exception as e:
         logger.error(f"Content-with-media generation error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Content generation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=safe_error_detail(e, "Content generation failed"))
+
+
+@router.post("/content/{content_id}/regenerate", response_model=ContentGenerationResponse)
+async def regenerate_content(
+    content_id: int,
+    request: ContentRegenerateRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Regenerate the title and body for an existing content record.
+    Accepts optional user feedback to steer the new caption closer to their preference.
+    """
+    try:
+        logger.info(f"Regenerate request for content {content_id}")
+
+        service = ContentService(db)
+        content = await asyncio.to_thread(service.regenerate_content, content_id, request)
+
+        return ContentGenerationResponse(
+            content_id=content["id"],
+            platform=content["platform"],
+            title=content["title"],
+            body=content["body"],
+            metadata={
+                "hashtags": content["meta_data"].get("hashtags", []),
+                "keywords": content["meta_data"].get("keywords", []),
+                "tone": content["meta_data"].get("tone", request.tone),
+                "target_audience": request.target_audience,
+                "call_to_action": request.call_to_action,
+            },
+            status=content["status"],
+            generated_at=content["generated_at"],
+            media_path=content.get("media_path"),
+            media_type=content.get("media_type"),
+            media_original_name=content.get("media_original_name"),
+        )
+
+    except ContentGenerationError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except LLMConnectionError as e:
+        raise HTTPException(status_code=504, detail=str(e))
+    except Exception as e:
+        logger.error(f"Content regeneration endpoint error: {str(e)}")
+        raise HTTPException(status_code=500, detail=safe_error_detail(e, "Content regeneration failed"))
 
 
 @router.post("/content/media/upload", response_model=MediaUploadResponse)
+@limiter.limit("20/minute")
 async def upload_media(
+    request: Request,
     file: UploadFile = File(...),
 ):
     """
@@ -192,9 +263,11 @@ async def upload_media(
             media_url=result["media_url"],
         )
 
+    except ContentGenerationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Media upload error: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=safe_error_detail(e, "File upload failed"))
 
 
 @router.post("/content/{content_id}/post", response_model=list[SocialPostResponse])
@@ -213,6 +286,18 @@ async def post_content_to_socials(
         logger.info(
             f"Post request for content {content_id} to platforms: {request.platforms}"
         )
+
+        # Designer approval gate: when approval is required, only a caller with a
+        # valid designer PIN may publish directly. Everyone else must route
+        # through POST /approvals so the designer can review first.
+        from app.config import settings
+        from app.routes.approval import verify_pin
+
+        if settings.APPROVAL_REQUIRED and not verify_pin(request.designer_pin or ""):
+            raise HTTPException(
+                status_code=403,
+                detail="Designer approval required. Submit this post for approval instead.",
+            )
 
         from app.schemas.content import ContentPlatform as PlatformEnum
 
@@ -254,7 +339,7 @@ async def post_content_to_socials(
         raise
     except Exception as e:
         logger.error(f"Social posting error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to post to social media: {str(e)}")
+        raise HTTPException(status_code=500, detail=safe_error_detail(e, "Failed to post to social media"))
 
 
 @router.get("/content/history", response_model=list[ContentHistoryResponse])
@@ -302,7 +387,7 @@ async def get_content_history(
 
     except Exception as e:
         logger.error(f"Content history endpoint error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch content history: {str(e)}")
+        raise HTTPException(status_code=500, detail=safe_error_detail(e, "Failed to fetch content history"))
 
 
 @router.get("/content/{content_id}", response_model=ContentDetailResponse)
@@ -350,7 +435,7 @@ async def get_content_detail(
         raise
     except Exception as e:
         logger.error(f"Content detail endpoint error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch content: {str(e)}")
+        raise HTTPException(status_code=500, detail=safe_error_detail(e, "Failed to fetch content"))
 
 
 @router.patch("/content/{content_id}/status")
@@ -381,7 +466,30 @@ async def update_content_status(
         raise
     except Exception as e:
         logger.error(f"Update status endpoint error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to update status: {str(e)}")
+        raise HTTPException(status_code=500, detail=safe_error_detail(e, "Failed to update status"))
+
+
+@router.delete("/content/clear-all")
+async def clear_all_content(
+    db: Session = Depends(get_db),
+    _key: None = Depends(_require_internal_key),
+):
+    """
+    Delete every content record (and their linked approval requests).
+
+    Requires the X-Internal-API-Key header to prevent accidental or
+    malicious mass data deletion.
+    """
+    try:
+        approvals_deleted = db.query(ApprovalRequest).delete(synchronize_session=False)
+        content_deleted   = db.query(Content).delete(synchronize_session=False)
+        db.commit()
+        logger.info(f"Cleared all content: {content_deleted} rows, {approvals_deleted} approval rows")
+        return {"deleted_content": content_deleted, "deleted_approvals": approvals_deleted}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Clear all content error: {e}")
+        raise HTTPException(status_code=500, detail=safe_error_detail(e, "Failed to clear content"))
 
 
 @router.delete("/content/{content_id}")
@@ -407,4 +515,4 @@ async def delete_content(
         raise
     except Exception as e:
         logger.error(f"Delete content endpoint error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete content: {str(e)}")
+        raise HTTPException(status_code=500, detail=safe_error_detail(e, "Failed to delete content"))

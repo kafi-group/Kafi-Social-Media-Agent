@@ -36,7 +36,8 @@ class LLMClient:
 
         Args:
             prompt: The prompt to send to the LLM
-            **kwargs: Additional parameters (temperature, etc.)
+            **kwargs: Additional parameters (temperature, max_output_tokens,
+                      response_mime_type, etc.)
 
         Returns:
             Generated text string
@@ -45,9 +46,187 @@ class LLMClient:
             LLMConnectionError: If generation fails
         """
         temperature = kwargs.get("temperature", self.temperature)
-        return self._generate_gemini(prompt, temperature)
+        max_output_tokens = kwargs.get("max_output_tokens", settings.MAX_TOKENS)
+        response_mime_type = kwargs.get("response_mime_type")
+        return self._generate_gemini(
+            prompt,
+            temperature,
+            max_output_tokens=max_output_tokens,
+            response_mime_type=response_mime_type,
+        )
 
-    def _generate_gemini(self, prompt: str, temperature: float) -> str:
+    def chat(
+        self,
+        messages: list[dict],
+        *,
+        api_key: str | None = None,
+        model: str | None = None,
+        fallback_model: str | None = None,
+    ) -> tuple[str, str]:
+        """
+        Multi-turn chat via Google Gemini API.
+
+        Args:
+            messages: List of {role, content} with roles user/assistant/system.
+            api_key: Optional override (e.g. CREATION_GEMINI_API_KEY).
+            model: Optional primary model override.
+            fallback_model: Optional fallback model override.
+
+        Returns:
+            Tuple of (reply text, model id used).
+        """
+        key = (api_key or settings.GEMINI_API_KEY).strip()
+        if not key:
+            raise LLMConnectionError(
+                "Gemini API key not configured. "
+                "Set GEMINI_API_KEY or CREATION_GEMINI_API_KEY in your .env file. "
+                "Get a free key at https://aistudio.google.com/apikey"
+            )
+
+        system_instruction: dict | None = None
+        contents: list[dict] = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            text = (msg.get("content") or "").strip()
+            if not text:
+                continue
+            if role == "system":
+                system_instruction = {"parts": [{"text": text}]}
+                continue
+            gemini_role = "model" if role == "assistant" else "user"
+            contents.append({"role": gemini_role, "parts": [{"text": text}]})
+
+        if not contents:
+            raise LLMConnectionError("No messages to send.")
+
+        primary = (model or settings.GEMINI_MODEL).strip()
+        fb = (fallback_model or settings.GEMINI_FALLBACK_MODEL).strip()
+        models = [primary]
+        if fb and fb not in models:
+            models.append(fb)
+
+        last_error: Exception | None = None
+        for model_index, model_id in enumerate(models):
+            try:
+                reply = self._chat_gemini_with_retries(
+                    contents,
+                    model_id,
+                    api_key=key,
+                    system_instruction=system_instruction,
+                )
+                return reply, model_id
+            except LLMConnectionError as e:
+                last_error = e
+                if model_index < len(models) - 1:
+                    logger.warning(
+                        f"Gemini chat model {model_id} failed ({e}). "
+                        f"Trying fallback: {models[model_index + 1]}"
+                    )
+                    continue
+                raise
+
+        raise LLMConnectionError(f"Gemini chat failed: {last_error}") from last_error
+
+    def _chat_gemini_with_retries(
+        self,
+        contents: list[dict],
+        model: str,
+        *,
+        api_key: str,
+        system_instruction: dict | None = None,
+    ) -> str:
+        """Call Gemini with a multi-turn conversation."""
+        logger.info(f"Gemini chat (model: {model}, turns: {len(contents)})")
+
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model}:generateContent"
+            f"?key={api_key}"
+        )
+
+        payload: dict = {
+            "contents": contents,
+            "generationConfig": {
+                "temperature": self.temperature,
+                "maxOutputTokens": settings.MAX_TOKENS,
+                "topP": settings.TOP_P,
+            },
+        }
+        if system_instruction:
+            payload["systemInstruction"] = system_instruction
+
+        max_retries = settings.GEMINI_MAX_RETRIES
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = requests.post(
+                    url,
+                    json=payload,
+                    timeout=settings.GEMINI_TIMEOUT,
+                )
+
+                if response.status_code == 429:
+                    raise LLMConnectionError(
+                        "Gemini API rate limit exceeded. "
+                        "Free tier allows ~1,500 requests/day. "
+                        "Try again shortly."
+                    )
+
+                if response.status_code in _RETRYABLE_STATUS_CODES:
+                    error_msg = response.text[:200]
+                    if attempt < max_retries:
+                        delay = 2 ** attempt
+                        logger.warning(
+                            f"Gemini chat {model} returned {response.status_code} "
+                            f"(attempt {attempt}/{max_retries}). Retrying in {delay}s..."
+                        )
+                        time.sleep(delay)
+                        continue
+                    raise LLMConnectionError(
+                        f"Gemini API unavailable ({response.status_code}): {error_msg}"
+                    )
+
+                response.raise_for_status()
+                data = response.json()
+
+                candidates = data.get("candidates", [])
+                if not candidates:
+                    raise LLMConnectionError(
+                        f"Gemini returned no candidates. Response: {json.dumps(data)[:200]}"
+                    )
+
+                parts = candidates[0].get("content", {}).get("parts", [])
+                if not parts:
+                    raise LLMConnectionError("Gemini returned empty content")
+
+                return parts[0].get("text", "")
+
+            except requests.exceptions.Timeout as e:
+                if attempt < max_retries:
+                    delay = 2 ** attempt
+                    logger.warning(
+                        f"Gemini chat {model} timed out (attempt {attempt}/{max_retries}). "
+                        f"Retrying in {delay}s..."
+                    )
+                    time.sleep(delay)
+                    continue
+                raise LLMConnectionError(
+                    f"Gemini API request timed out after {settings.GEMINI_TIMEOUT}s"
+                ) from e
+            except LLMConnectionError:
+                raise
+            except requests.exceptions.RequestException as e:
+                raise LLMConnectionError(f"Gemini API request failed: {str(e)}") from e
+
+        raise LLMConnectionError(f"Gemini chat failed after {max_retries} attempts")
+
+    def _generate_gemini(
+        self,
+        prompt: str,
+        temperature: float,
+        *,
+        max_output_tokens: int = settings.MAX_TOKENS,
+        response_mime_type: str | None = None,
+    ) -> str:
         """Generate text via Google Gemini API (free, fast)."""
         if not settings.GEMINI_API_KEY:
             raise LLMConnectionError(
@@ -63,7 +242,13 @@ class LLMClient:
         last_error: Exception | None = None
         for model_index, model in enumerate(models):
             try:
-                return self._generate_gemini_with_retries(prompt, temperature, model)
+                return self._generate_gemini_with_retries(
+                    prompt,
+                    temperature,
+                    model,
+                    max_output_tokens=max_output_tokens,
+                    response_mime_type=response_mime_type,
+                )
             except LLMConnectionError as e:
                 last_error = e
                 if model_index < len(models) - 1:
@@ -77,7 +262,13 @@ class LLMClient:
         raise LLMConnectionError(f"Gemini API request failed: {last_error}") from last_error
 
     def _generate_gemini_with_retries(
-        self, prompt: str, temperature: float, model: str
+        self,
+        prompt: str,
+        temperature: float,
+        model: str,
+        *,
+        max_output_tokens: int = settings.MAX_TOKENS,
+        response_mime_type: str | None = None,
     ) -> str:
         """Call a single Gemini model with retries for transient failures."""
         logger.info(f"Generating via Google Gemini (model: {model})")
@@ -88,15 +279,19 @@ class LLMClient:
             f"?key={settings.GEMINI_API_KEY}"
         )
 
+        generation_config: dict = {
+            "temperature": temperature,
+            "maxOutputTokens": max_output_tokens,
+            "topP": settings.TOP_P,
+        }
+        if response_mime_type:
+            generation_config["responseMimeType"] = response_mime_type
+
         payload = {
             "contents": [{
                 "parts": [{"text": prompt}]
             }],
-            "generationConfig": {
-                "temperature": temperature,
-                "maxOutputTokens": settings.MAX_TOKENS,
-                "topP": settings.TOP_P,
-            }
+            "generationConfig": generation_config,
         }
 
         max_retries = settings.GEMINI_MAX_RETRIES
@@ -136,6 +331,13 @@ class LLMClient:
                 if not candidates:
                     raise LLMConnectionError(
                         f"Gemini returned no candidates. Response: {json.dumps(data)[:200]}"
+                    )
+
+                finish_reason = candidates[0].get("finishReason")
+                if finish_reason == "MAX_TOKENS":
+                    logger.warning(
+                        f"Gemini {model} hit maxOutputTokens ({max_output_tokens}); "
+                        "response may be truncated"
                     )
 
                 parts = candidates[0].get("content", {}).get("parts", [])

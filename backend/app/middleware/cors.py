@@ -1,18 +1,32 @@
 """
 CORS Middleware Configuration
+
+Origins are read from CORS_ORIGINS in .env so production deployments can
+restrict access without touching code.
+
+Methods and headers are restricted to the minimum required — wildcard
+allow_methods / allow_headers are intentionally NOT used.
 """
+
+from app.config import settings
 
 
 def get_cors_settings() -> dict:
-    """Get CORS settings."""
+    """Return CORS settings driven by the environment configuration."""
     return {
-        "allow_origins": [
-            "http://localhost:3000",
-            "http://localhost:8000",
-            "http://127.0.0.1:3000",
-            "http://127.0.0.1:8000",
-        ],
+        "allow_origins": settings.CORS_ORIGINS,
         "allow_credentials": True,
-        "allow_methods": ["*"],
-        "allow_headers": ["*"],
+        # Explicit list prevents accidental exposure of exotic HTTP verbs
+        "allow_methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        # Only the headers the frontend actually sends
+        "allow_headers": [
+            "Content-Type",
+            "Authorization",
+            "X-Internal-API-Key",
+            "Accept",
+            "Origin",
+            "X-Requested-With",
+        ],
+        "expose_headers": ["X-Request-ID"],
+        "max_age": 600,  # pre-flight cache: 10 minutes
     }

@@ -178,6 +178,49 @@ class QAReport(Base):
     content = relationship("Content", back_populates="qa_reports")
 
 
+class ApprovalStatus(str, PyEnum):
+    """Designer approval request status."""
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class ApprovalRequest(Base):
+    """
+    A request for a designer to approve a post before it is published.
+
+    Created when a non-designer tries to post. Stores the exact posting
+    configuration so the post can be published verbatim once approved.
+    """
+
+    __tablename__ = "approval_request"
+
+    id = Column(Integer, primary_key=True)
+    content_id = Column(Integer, ForeignKey("content.id"), nullable=False)
+    status = Column(Enum(ApprovalStatus), default=ApprovalStatus.PENDING)
+
+    # Posting configuration captured at submit time
+    platforms = Column(JSON, nullable=True)  # ["linkedin", "facebook", ...]
+    draft_mode = Column(Boolean, default=False)
+    override_title = Column(Text, nullable=True)
+    override_body = Column(Text, nullable=True)
+    linkedin_account_labels = Column(JSON, nullable=True)
+
+    requested_by = Column(String(100), nullable=True)  # submitter name (optional)
+    review_token = Column(String(64), unique=True, nullable=False)  # email magic link
+    review_token_expires_at = Column(DateTime, nullable=True)  # token TTL (48 h default)
+    reviewer_note = Column(Text, nullable=True)  # rejection reason / approval note
+    results = Column(JSON, nullable=True)  # per-platform publish results on approval
+
+    decided_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    content = relationship("Content")
+
+
 class ScraperLog(Base):
     """Scraper execution logs."""
 

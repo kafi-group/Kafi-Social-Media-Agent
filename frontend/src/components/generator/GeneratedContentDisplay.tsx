@@ -1,14 +1,28 @@
 'use client';
 
-import { useState } from 'react';
-import { ContentGenerationResponse } from '@/lib/types';
+import { useState, useEffect } from 'react';
+import { ContentGenerationResponse, ContentRegenerateRequest } from '@/lib/types';
+
+export interface GenerationContext {
+  topic: string;
+  brand_context: string;
+  tone: string;
+  target_audience: string;
+  call_to_action: string;
+  additional_instructions: string;
+}
 
 interface GeneratedContentDisplayProps {
   contents: ContentGenerationResponse[];
   mediaPreview?: string | null;
   mediaType?: 'image' | 'video' | null;
   mediaFileName?: string;
+  generationContext?: GenerationContext;
   onContentUpdate?: (contentId: number, updatedTitle: string, updatedBody: string) => void;
+  onRegenerate?: (
+    contentId: number,
+    payload: ContentRegenerateRequest
+  ) => Promise<ContentGenerationResponse>;
 }
 
 const PLATFORM_COLORS: Record<string, string> = {
@@ -38,7 +52,9 @@ export default function GeneratedContentDisplay({
   mediaPreview,
   mediaType,
   mediaFileName,
+  generationContext,
   onContentUpdate,
+  onRegenerate,
 }: GeneratedContentDisplayProps) {
   const [selectedContent, setSelectedContent] = useState<ContentGenerationResponse | null>(
     contents.length > 0 ? contents[0] : null
@@ -47,6 +63,16 @@ export default function GeneratedContentDisplay({
   const [editingContentId, setEditingContentId] = useState<number | null>(null);
   const [editTitle, setEditTitle] = useState('');
   const [editBody, setEditBody] = useState('');
+  const [showRegeneratePanel, setShowRegeneratePanel] = useState(false);
+  const [regenerationInstructions, setRegenerationInstructions] = useState('');
+  const [regenerating, setRegenerating] = useState(false);
+  const [regenerateError, setRegenerateError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!selectedContent) return;
+    const updated = contents.find((c) => c.content_id === selectedContent.content_id);
+    if (updated) setSelectedContent(updated);
+  }, [contents, selectedContent?.content_id]);
 
   const copyToClipboard = (text: string, contentId: number) => {
     navigator.clipboard.writeText(text);
@@ -58,6 +84,7 @@ export default function GeneratedContentDisplay({
     setEditingContentId(content.content_id);
     setEditTitle(content.title);
     setEditBody(content.body);
+    setShowRegeneratePanel(false);
   };
 
   const cancelEditing = () => {
@@ -70,13 +97,40 @@ export default function GeneratedContentDisplay({
     if (editingContentId === null) return;
     if (!editTitle.trim()) return;
     onContentUpdate?.(editingContentId, editTitle.trim(), editBody.trim());
-    // Also update local state so the display reflects the change immediately
     setSelectedContent((prev) =>
       prev?.content_id === editingContentId
         ? { ...prev, title: editTitle.trim(), body: editBody.trim() }
         : prev
     );
     setEditingContentId(null);
+  };
+
+  const handleRegenerate = async () => {
+    if (!selectedContent || !onRegenerate || !generationContext) return;
+
+    setRegenerating(true);
+    setRegenerateError(null);
+
+    try {
+      const updated = await onRegenerate(selectedContent.content_id, {
+        topic: generationContext.topic,
+        brand_context: generationContext.brand_context,
+        tone: generationContext.tone,
+        target_audience: generationContext.target_audience,
+        call_to_action: generationContext.call_to_action,
+        additional_instructions: generationContext.additional_instructions,
+        regeneration_instructions: regenerationInstructions.trim(),
+      });
+
+      setSelectedContent(updated);
+      setRegenerationInstructions('');
+      setShowRegeneratePanel(false);
+      cancelEditing();
+    } catch (err) {
+      setRegenerateError(err instanceof Error ? err.message : 'Failed to regenerate caption');
+    } finally {
+      setRegenerating(false);
+    }
   };
 
   if (contents.length === 0) {
@@ -126,6 +180,9 @@ export default function GeneratedContentDisplay({
                   onClick={() => {
                     setSelectedContent(content);
                     cancelEditing();
+                    setShowRegeneratePanel(false);
+                    setRegenerationInstructions('');
+                    setRegenerateError(null);
                   }}
                   className={`w-full text-left p-3 rounded-lg transition-all ${
                     selectedContent?.content_id === content.content_id
@@ -230,6 +287,84 @@ export default function GeneratedContentDisplay({
                     </>
                   )}
                 </div>
+
+                {/* Regenerate Panel */}
+                {onRegenerate && generationContext && editingContentId !== selectedContent.content_id && (
+                  <div className="mb-6 border border-amber-200 bg-amber-50 rounded-lg p-4">
+                    {!showRegeneratePanel ? (
+                      <div className="flex items-center justify-between gap-4">
+                        <div>
+                          <p className="text-sm font-semibold text-amber-900">Not happy with this caption?</p>
+                          <p className="text-xs text-amber-800 mt-0.5">
+                            Generate a fresh title and body. Add details to steer the new version.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowRegeneratePanel(true);
+                            setRegenerateError(null);
+                          }}
+                          className="shrink-0 px-4 py-2 rounded-lg bg-amber-600 text-white text-sm font-medium hover:bg-amber-700 transition-colors"
+                        >
+                          🔄 Regenerate
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        <div>
+                          <p className="text-sm font-semibold text-amber-900 mb-1">Regenerate caption</p>
+                          <p className="text-xs text-amber-800">
+                            Tell the AI what to change — tone, length, angle, keywords, or anything else.
+                          </p>
+                        </div>
+                        <textarea
+                          value={regenerationInstructions}
+                          onChange={(e) => setRegenerationInstructions(e.target.value)}
+                          rows={4}
+                          placeholder="e.g., Make it shorter and more casual. Lead with the EU partnership. Use fewer hashtags and a stronger CTA."
+                          className="w-full px-3 py-2 border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 text-sm text-gray-800 bg-white"
+                        />
+                        {regenerateError && (
+                          <p className="text-sm text-red-600">{regenerateError}</p>
+                        )}
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={handleRegenerate}
+                            disabled={regenerating}
+                            className={`flex-1 py-2 px-4 rounded-lg text-sm font-medium text-white transition-colors ${
+                              regenerating
+                                ? 'bg-gray-400 cursor-not-allowed'
+                                : 'bg-amber-600 hover:bg-amber-700'
+                            }`}
+                          >
+                            {regenerating ? (
+                              <span className="flex items-center justify-center gap-2">
+                                <span className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                Generating...
+                              </span>
+                            ) : (
+                              '✨ Generate New Caption'
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowRegeneratePanel(false);
+                              setRegenerationInstructions('');
+                              setRegenerateError(null);
+                            }}
+                            disabled={regenerating}
+                            className="px-4 py-2 rounded-lg text-sm font-medium bg-white border border-amber-300 text-amber-900 hover:bg-amber-100 transition-colors"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* Metadata */}
                 <div className="space-y-4">

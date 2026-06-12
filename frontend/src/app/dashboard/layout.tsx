@@ -12,7 +12,8 @@ interface DashboardLayoutProps {
 
 const NAV_ITEMS = [
   { href: '/dashboard', label: 'Dashboard' },
-  { href: '/dashboard/generator', label: 'Content Generator' },
+  { href: '/dashboard/creation', label: 'Content Creation' },
+  { href: '/dashboard/generator', label: 'Content Posting' },
   { href: '/dashboard/calendar', label: 'Calendar' },
   { href: '/dashboard/analytics', label: 'Analytics' },
   { href: '/dashboard/qa', label: 'QA Checker' },

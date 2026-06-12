@@ -16,14 +16,18 @@ from app.config import settings
 from app.utils.logger import logger
 from app.utils.exceptions import ContentGenerationError
 
-# Allowed file extensions
-ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg"}
+# ── Allowed file extensions ───────────────────────────────────────────────────
+# SVG is intentionally excluded: an SVG with embedded <script> tags served as
+# image/svg+xml from /uploads would allow stored-XSS.
+ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".webm", ".mkv"}
-ALLOWED_DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx"}
-ALLOWED_EXTENSIONS = ALLOWED_IMAGE_EXTENSIONS | ALLOWED_VIDEO_EXTENSIONS | ALLOWED_DOCUMENT_EXTENSIONS
+ALLOWED_DOCUMENT_EXTENSIONS = {".pdf"}
+ALLOWED_EXTENSIONS = (
+    ALLOWED_IMAGE_EXTENSIONS | ALLOWED_VIDEO_EXTENSIONS | ALLOWED_DOCUMENT_EXTENSIONS
+)
 
-# Max file size (50MB)
-MAX_FILE_SIZE = 50 * 1024 * 1024
+# Max file size (from settings; hard cap here as a safety net)
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
 
 # Local fallback directory
 LOCAL_UPLOAD_DIR = Path(__file__).parent.parent.parent / "uploads"
@@ -35,16 +39,65 @@ EXTENSION_TO_MIME = {
     ".png": "image/png",
     ".gif": "image/gif",
     ".webp": "image/webp",
-    ".svg": "image/svg+xml",
     ".mp4": "video/mp4",
     ".mov": "video/quicktime",
     ".avi": "video/x-msvideo",
     ".webm": "video/webm",
     ".mkv": "video/x-matroska",
     ".pdf": "application/pdf",
-    ".doc": "application/msword",
-    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }
+
+# Magic-byte signatures for allowed file types.
+# Each entry maps a (lowercase) extension to a list of byte patterns that must
+# appear at the start of the file.  If a file's actual bytes don't match its
+# declared extension it is rejected — this catches renamed / polyglot files.
+_MAGIC_BYTES: dict[str, list[bytes]] = {
+    ".jpg":  [b"\xff\xd8\xff"],
+    ".jpeg": [b"\xff\xd8\xff"],
+    ".png":  [b"\x89PNG\r\n\x1a\n"],
+    ".gif":  [b"GIF87a", b"GIF89a"],
+    ".webp": [b"RIFF"],           # RIFF????WEBP — checked more carefully below
+    ".mp4":  [b"\x00\x00\x00", b"ftyp"],  # ISO base media (offset 4 = ftyp)
+    ".mov":  [b"\x00\x00\x00"],           # QuickTime (ftyp/mdat at offset 4)
+    ".avi":  [b"RIFF"],
+    ".webm": [b"\x1a\x45\xdf\xa3"],
+    ".mkv":  [b"\x1a\x45\xdf\xa3"],
+    ".pdf":  [b"%PDF-"],
+}
+
+
+def _validate_magic_bytes(content: bytes, extension: str) -> None:
+    """
+    Verify that the file's leading bytes match the declared extension.
+
+    Raises ContentGenerationError when the signature does not match, which
+    prevents disguised files (e.g. an HTML file renamed to .jpg) from being
+    stored and served.
+    """
+    ext = extension.lower()
+    signatures = _MAGIC_BYTES.get(ext)
+    if not signatures:
+        return  # No signature defined for this type; skip check
+
+    matched = False
+    for sig in signatures:
+        if content[:len(sig)] == sig:
+            matched = True
+            break
+
+    # WebP has a 4-byte length field between RIFF and WEBP; check offset 8
+    if ext == ".webp" and content[:4] == b"RIFF":
+        matched = content[8:12] == b"WEBP"
+
+    # MP4 / MOV: the "ftyp" atom appears at byte offset 4
+    if ext in (".mp4", ".mov") and len(content) >= 12:
+        matched = content[4:8] in (b"ftyp", b"mdat", b"moov", b"free", b"wide")
+
+    if not matched:
+        raise ContentGenerationError(
+            f"File content does not match the declared type '{ext}'. "
+            "Upload a valid file."
+        )
 
 
 def get_media_type(extension: str) -> str:
@@ -221,7 +274,11 @@ class LocalStorageBackend:
 
     def upload(self, path: str, file_data: bytes, content_type: str) -> str:
         """Save file to local disk and return relative URL path."""
-        full_path = LOCAL_UPLOAD_DIR / path
+        # Resolve and verify the destination is inside the uploads directory
+        full_path = (LOCAL_UPLOAD_DIR / path).resolve()
+        base_resolved = LOCAL_UPLOAD_DIR.resolve()
+        if not str(full_path).startswith(str(base_resolved)):
+            raise ContentGenerationError("Access denied: path traversal detected in upload path")
         full_path.parent.mkdir(parents=True, exist_ok=True)
         with open(full_path, "wb") as f:
             f.write(file_data)
@@ -230,7 +287,12 @@ class LocalStorageBackend:
 
     def download(self, path: str) -> bytes:
         """Read file bytes from local disk."""
-        full_path = LOCAL_UPLOAD_DIR / path
+        # Resolve the full path and confirm it is inside the uploads directory
+        # (prevents path traversal attacks like ../../etc/passwd).
+        full_path = (LOCAL_UPLOAD_DIR / path).resolve()
+        base_resolved = LOCAL_UPLOAD_DIR.resolve()
+        if not str(full_path).startswith(str(base_resolved)):
+            raise ContentGenerationError("Access denied: path traversal detected")
         if not full_path.exists():
             raise ContentGenerationError(f"Local file not found: {path}")
         with open(full_path, "rb") as f:
@@ -314,10 +376,18 @@ class MediaService:
         content = await file.read()
 
         # Check file size
-        if len(content) > MAX_FILE_SIZE:
+        max_size = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+        if len(content) > max_size:
             raise ContentGenerationError(
-                f"File size exceeds maximum of {MAX_FILE_SIZE // (1024*1024)}MB"
+                f"File size exceeds the maximum of {settings.MAX_UPLOAD_SIZE_MB} MB"
             )
+
+        # Reject empty files
+        if len(content) == 0:
+            raise ContentGenerationError("Uploaded file is empty")
+
+        # Validate actual file content against declared extension (magic bytes)
+        _validate_magic_bytes(content, extension)
 
         # Determine media type
         media_type = get_media_type(extension)

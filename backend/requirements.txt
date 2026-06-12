@@ -34,6 +34,9 @@ pytz>=2023
 # Async HTTP
 aiohttp>=3.9
 
+# Security
+slowapi>=0.1.9          # Rate limiting (DoS / brute-force protection)
+
 # Dev & Testing
 pytest>=7.4
 pytest-asyncio>=0.21

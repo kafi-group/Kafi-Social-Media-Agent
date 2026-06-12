@@ -1,9 +1,10 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
-import { ContentGenerationResponse, LinkedInAccountInfo, SocialPostResponse } from '@/lib/types';
-import { API_ENDPOINTS } from '@/lib/api-client';
+import { ContentGenerationResponse, ContentRegenerateRequest, LinkedInAccountInfo, SocialPostResponse } from '@/lib/types';
+import { API_ENDPOINTS, API_CONFIG } from '@/lib/api-client';
 import GeneratedContentDisplay from './GeneratedContentDisplay';
+import DesignerGateModal from './DesignerGateModal';
 import ScheduleModal from '@/components/calendar/ScheduleModal';
 
 interface ContentGenerationFormProps {
@@ -68,17 +69,83 @@ export default function ContentGenerationForm({ onGenerate }: ContentGenerationF
   const [scheduleOpen, setScheduleOpen] = useState(false);
   const [scheduleContentId, setScheduleContentId] = useState<number | null>(null);
 
+  // Designer approval gate
+  const [approvalRequired, setApprovalRequired] = useState(false);
+  const [emailConfigured, setEmailConfigured] = useState(false);
+  const [gateOpen, setGateOpen] = useState(false);
+  const [submittingApproval, setSubmittingApproval] = useState(false);
+  const [approvalSubmitted, setApprovalSubmitted] = useState(false);
+
   const handleContentUpdate = (contentId: number, updatedTitle: string, updatedBody: string) => {
     setEditedContents((prev) => ({
       ...prev,
       [contentId]: { title: updatedTitle, body: updatedBody },
     }));
-    // Also update the generatedContents array so the sidebar reflects the change
     setGeneratedContents((prev) =>
       prev.map((c) =>
         c.content_id === contentId ? { ...c, title: updatedTitle, body: updatedBody } : c
       )
     );
+  };
+
+  const handleRegenerate = async (
+    contentId: number,
+    payload: ContentRegenerateRequest
+  ): Promise<ContentGenerationResponse> => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), API_CONFIG.timeout);
+
+    let response: Response;
+    try {
+      response = await fetch(API_ENDPOINTS.CONTENT_REGENERATE(contentId), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new Error(
+          'Caption regeneration timed out. The AI took too long — try again with shorter instructions.'
+        );
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      const detail = errorData.detail;
+      if (response.status === 404 && detail === 'Not Found') {
+        throw new Error(
+          'Regenerate is not available on the running backend. Stop the server completely and start it again, then retry.'
+        );
+      }
+      if (response.status === 504) {
+        throw new Error(
+          typeof detail === 'string'
+            ? detail
+            : 'AI service timed out while regenerating. Please try again.'
+        );
+      }
+      throw new Error(
+        typeof detail === 'string' ? detail : 'Failed to regenerate caption'
+      );
+    }
+
+    const updated: ContentGenerationResponse = await response.json();
+
+    setGeneratedContents((prev) =>
+      prev.map((c) => (c.content_id === contentId ? updated : c))
+    );
+    setEditedContents((prev) => {
+      const next = { ...prev };
+      delete next[contentId];
+      return next;
+    });
+
+    return updated;
   };
 
   // Cleanup object URL on unmount to prevent memory leaks
@@ -87,6 +154,24 @@ export default function ContentGenerationForm({ onGenerate }: ContentGenerationF
       if (mediaPreview) URL.revokeObjectURL(mediaPreview);
     };
   }, [mediaPreview]);
+
+  // Load approval config (whether posts must be approved by the designer)
+  useEffect(() => {
+    let cancelled = false;
+    fetch(API_ENDPOINTS.APPROVAL_CONFIG)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((cfg) => {
+        if (cancelled || !cfg) return;
+        setApprovalRequired(Boolean(cfg.approval_required));
+        setEmailConfigured(Boolean(cfg.designer_email_configured));
+      })
+      .catch(() => {
+        /* gate stays off if config can't load */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Load configured LinkedIn accounts when entering preview step
   useEffect(() => {
@@ -214,12 +299,13 @@ export default function ContentGenerationForm({ onGenerate }: ContentGenerationF
     }
   };
 
-  const handlePostToSocials = async () => {
+  // Validate the post selection. Returns the platforms to post to, or null.
+  const validatePost = (): string[] | null => {
     const platformsToPost = selectedPlatforms.filter(p => ['linkedin', 'facebook', 'instagram', 'youtube'].includes(p));
 
     if (platformsToPost.length === 0) {
       setError('Select at least LinkedIn, Facebook, Instagram, or YouTube to post');
-      return;
+      return null;
     }
 
     if (
@@ -228,8 +314,78 @@ export default function ContentGenerationForm({ onGenerate }: ContentGenerationF
       selectedLinkedinAccounts.length === 0
     ) {
       setError('Select at least one LinkedIn account to post to');
+      return null;
+    }
+    return platformsToPost;
+  };
+
+  // Entry point for the "Post Now" button. Shows the designer gate when
+  // approval is required, otherwise posts directly.
+  const handlePostClick = () => {
+    const platformsToPost = validatePost();
+    if (!platformsToPost) return;
+    setError(null);
+    setApprovalSubmitted(false);
+
+    if (approvalRequired) {
+      setGateOpen(true);
+    } else {
+      doPost();
+    }
+  };
+
+  // Submit the generated posts to the designer for approval (non-designer path).
+  const submitForApproval = async (requestedBy: string) => {
+    const platformsToPost = validatePost();
+    if (!platformsToPost) {
+      setGateOpen(false);
       return;
     }
+
+    setSubmittingApproval(true);
+    setError(null);
+
+    try {
+      for (const content of generatedContents) {
+        if (!platformsToPost.includes(content.platform)) continue;
+
+        const edited = editedContents[content.content_id];
+        const payload: Record<string, unknown> = {
+          content_id: content.content_id,
+          platforms: [content.platform],
+          draft_mode: draftMode,
+          override_title: edited?.title ?? null,
+          override_body: edited?.body ?? null,
+          requested_by: requestedBy || null,
+        };
+        if (content.platform === 'linkedin' && selectedLinkedinAccounts.length > 0) {
+          payload.linkedin_account_labels = selectedLinkedinAccounts;
+        }
+
+        const res = await fetch(API_ENDPOINTS.APPROVALS, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.detail || 'Failed to submit for approval');
+        }
+      }
+      setApprovalSubmitted(true);
+      setGateOpen(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to submit for approval');
+    } finally {
+      setSubmittingApproval(false);
+    }
+  };
+
+  const doPost = async (designerPin?: string) => {
+    const platformsToPost = validatePost();
+    if (!platformsToPost) return;
+
+    setGateOpen(false);
 
     // Initialize posting states
     const states: Record<string, 'idle' | 'posting' | 'done' | 'error' | 'partial'> = {};
@@ -256,6 +412,10 @@ export default function ContentGenerationForm({ onGenerate }: ContentGenerationF
           override_title: edited?.title ?? null,
           override_body: edited?.body ?? null,
         };
+
+        if (designerPin) {
+          postPayload.designer_pin = designerPin;
+        }
 
         if (content.platform === 'linkedin' && selectedLinkedinAccounts.length > 0) {
           postPayload.linkedin_account_labels = selectedLinkedinAccounts;
@@ -326,7 +486,16 @@ export default function ContentGenerationForm({ onGenerate }: ContentGenerationF
           mediaPreview={mediaPreview}
           mediaType={mediaType}
           mediaFileName={mediaFile?.name}
+          generationContext={{
+            topic: topic.trim(),
+            brand_context: brandContext,
+            tone,
+            target_audience: targetAudience,
+            call_to_action: callToAction,
+            additional_instructions: additionalInstructions,
+          }}
           onContentUpdate={handleContentUpdate}
+          onRegenerate={handleRegenerate}
         />
 
         {/* Post to Socials Section */}
@@ -554,10 +723,22 @@ export default function ContentGenerationForm({ onGenerate }: ContentGenerationF
             </div>
           )}
 
+          {/* Approval submitted confirmation */}
+          {approvalSubmitted && (
+            <div className="mb-4 bg-blue-50 border border-blue-200 text-blue-800 rounded-lg px-4 py-3">
+              <p className="font-semibold">Sent to the designer for approval ✅</p>
+              <p className="text-sm mt-0.5">
+                This post won&apos;t be published until the designer approves it
+                {emailConfigured ? ' (an email was sent to them)' : ''}. You can track
+                its status in the QA Checker.
+              </p>
+            </div>
+          )}
+
           {/* Action Buttons */}
           <div className="flex gap-3 flex-wrap">
             <button
-              onClick={handlePostToSocials}
+              onClick={handlePostClick}
               disabled={Object.values(postingStates).some(s => s === 'posting')}
               className={`flex-1 min-w-[180px] py-3 px-4 rounded-lg font-semibold text-white transition-all ${
                 Object.values(postingStates).some(s => s === 'posting')
@@ -596,6 +777,15 @@ export default function ContentGenerationForm({ onGenerate }: ContentGenerationF
             initialOverrides={
               scheduleContentId != null ? editedContents[scheduleContentId] : undefined
             }
+          />
+
+          <DesignerGateModal
+            open={gateOpen}
+            emailConfigured={emailConfigured}
+            submitting={submittingApproval}
+            onClose={() => setGateOpen(false)}
+            onConfirmDesigner={(pin) => doPost(pin)}
+            onSubmitApproval={(requestedBy) => submitForApproval(requestedBy)}
           />
 
           <p className="text-xs text-gray-400 mt-3 text-center">

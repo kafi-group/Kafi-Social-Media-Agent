@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.database.models import Content, ContentPlatform, ContentStatus, MediaType, PostStatus
 from app.config import settings
 from app.llm.ollama_client import LLMClient
-from app.schemas.content import ContentGenerationRequest, ContentMetadata
+from app.schemas.content import ContentGenerationRequest, ContentMetadata, ContentRegenerateRequest
 from app.utils.exceptions import ContentGenerationError
 from app.utils.logger import logger
 
@@ -440,6 +440,111 @@ Do NOT include any introductory text, explanations, greetings, or concluding rem
             f"[media={'yes' if media_path else 'no'}]"
         )
         return content
+
+    def regenerate_content(self, content_id: int, request: ContentRegenerateRequest) -> dict:
+        """
+        Regenerate title and body for an existing content record using user feedback.
+        """
+        content = self.db.query(Content).filter(Content.id == content_id).first()
+        if not content:
+            raise ContentGenerationError(f"Content {content_id} not found")
+
+        logger.info(f"Regenerating content {content_id} for platform {content.platform}")
+
+        gen_request = ContentGenerationRequest(
+            platforms=[content.platform],
+            topic=request.topic,
+            brand_context=request.brand_context,
+            tone=request.tone,
+            target_audience=request.target_audience,
+            call_to_action=request.call_to_action,
+            additional_instructions=request.additional_instructions,
+        )
+
+        prompt = self._build_regeneration_prompt(
+            platform=content.platform,
+            request=gen_request,
+            previous_title=content.title,
+            previous_body=content.body,
+            regeneration_instructions=request.regeneration_instructions,
+        )
+
+        ai_response = self.llm_client.generate(prompt, temperature=self.temperature + 0.1)
+        title, body = self._parse_response(ai_response, content.platform)
+
+        metadata = content.meta_data or {}
+        metadata.update(
+            {
+                "tone": request.tone,
+                "target_audience": request.target_audience,
+                "hashtags": self._generate_hashtags(request.topic, content.platform),
+                "keywords": self._extract_keywords(request.topic),
+                "regenerated_at": datetime.utcnow().isoformat(),
+            }
+        )
+        if request.regeneration_instructions.strip():
+            metadata["last_regeneration_instructions"] = request.regeneration_instructions.strip()
+
+        content.title = title
+        content.body = body
+        content.meta_data = metadata
+        content.status = ContentStatus.GENERATED
+        content.generated_at = datetime.utcnow()
+        content.updated_at = datetime.utcnow()
+        self.db.commit()
+        self.db.refresh(content)
+
+        logger.info(f"Regenerated content {content_id}")
+
+        return {
+            "id": content.id,
+            "platform": content.platform,
+            "title": content.title,
+            "body": content.body,
+            "status": content.status,
+            "generated_at": content.generated_at.isoformat(),
+            "meta_data": content.meta_data,
+            "media_path": content.media_path,
+            "media_type": content.media_type.value if content.media_type else None,
+            "media_original_name": content.media_original_name,
+        }
+
+    def _build_regeneration_prompt(
+        self,
+        platform: ContentPlatform,
+        request: ContentGenerationRequest,
+        previous_title: str,
+        previous_body: str,
+        regeneration_instructions: str,
+    ) -> str:
+        """Build a prompt that asks for a fresh caption variant using user feedback."""
+        base_prompt = self._build_prompt(platform, request)
+
+        feedback_block = ""
+        if regeneration_instructions.strip():
+            feedback_block = f"""
+USER FEEDBACK — incorporate this closely in the new version:
+{regeneration_instructions.strip()}
+"""
+        else:
+            feedback_block = """
+The user was not satisfied with the previous version. Create a noticeably different alternative with a fresh hook and wording while staying on topic.
+"""
+
+        return f"""{base_prompt}
+
+REGENERATION TASK:
+The user already received a caption they did NOT like. Write a NEW version — do not copy phrasing from the previous caption.
+
+PREVIOUS TITLE (do not reuse):
+{previous_title}
+
+PREVIOUS BODY (do not reuse):
+{previous_body}
+{feedback_block}
+CRITICAL — Respond in EXACTLY this format with NO extra commentary before or after:
+TITLE: [Your new title here]
+BODY: [Your new short, punchy caption with hashtags here]"""
 
     def get_content(self, content_id: int) -> Optional[dict]:
         """

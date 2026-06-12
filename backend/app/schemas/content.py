@@ -58,6 +58,21 @@ class ContentGenerationRequest(BaseModel):
     additional_instructions: str = Field(default="", description="Additional specific instructions")
 
 
+class ContentRegenerateRequest(BaseModel):
+    """Request to regenerate caption title/body for existing content."""
+
+    topic: str = Field(..., description="Original topic used for generation")
+    brand_context: str = Field(default="Kafi Commodities")
+    tone: str = Field(default="professional")
+    target_audience: str = Field(default="business")
+    call_to_action: str = Field(default="")
+    additional_instructions: str = Field(default="")
+    regeneration_instructions: str = Field(
+        default="",
+        description="User feedback on what to change in the new caption",
+    )
+
+
 class ContentGenerationResponse(BaseModel):
     """Response model for generated content."""
 
@@ -159,6 +174,10 @@ class SocialPostRequest(BaseModel):
     linkedin_account_labels: Optional[list[str]] = Field(
         default=None,
         description="Post to specific LinkedIn accounts by label. Omit to post to all configured accounts.",
+    )
+    designer_pin: Optional[str] = Field(
+        default=None,
+        description="Designer PIN. Required to post directly when approval is enabled.",
     )
 
 
