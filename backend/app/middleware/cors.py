@@ -13,7 +13,7 @@ from app.config import settings
 
 def get_cors_settings() -> dict:
     """Return CORS settings driven by the environment configuration."""
-    return {
+    settings_dict: dict = {
         "allow_origins": settings.CORS_ORIGINS,
         "allow_credentials": True,
         # Explicit list prevents accidental exposure of exotic HTTP verbs
@@ -30,3 +30,6 @@ def get_cors_settings() -> dict:
         "expose_headers": ["X-Request-ID"],
         "max_age": 600,  # pre-flight cache: 10 minutes
     }
+    if settings.CORS_ALLOW_VERCEL_REGEX and settings.CORS_ORIGIN_REGEX.strip():
+        settings_dict["allow_origin_regex"] = settings.CORS_ORIGIN_REGEX.strip()
+    return settings_dict

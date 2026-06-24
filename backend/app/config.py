@@ -149,8 +149,25 @@ class Settings(BaseSettings):
     @classmethod
     def parse_cors_origins(cls, value: str | list[str]) -> list[str]:
         if isinstance(value, str):
-            return [origin.strip() for origin in value.split(",") if origin.strip()]
-        return value
+            raw = value.strip()
+            if raw.startswith("CORS_ORIGINS="):
+                raw = raw.split("=", 1)[1].strip()
+            origins = [origin.strip() for origin in raw.split(",") if origin.strip()]
+        else:
+            origins = value
+        cleaned: list[str] = []
+        for origin in origins:
+            o = origin.strip()
+            if o.startswith("CORS_ORIGINS="):
+                o = o.split("=", 1)[1].strip()
+            if o:
+                cleaned.append(o)
+        return cleaned
+
+    # Allow any Vercel preview/production URL (*.vercel.app). Preview deploys get a
+    # unique subdomain per build, so a fixed CORS_ORIGINS list cannot cover them all.
+    CORS_ALLOW_VERCEL_REGEX: bool = True
+    CORS_ORIGIN_REGEX: str = r"https://.*\.vercel\.app"
 
     @field_validator("DATABASE_URL", mode="after")
     @classmethod

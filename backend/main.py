@@ -124,6 +124,7 @@ cors_settings = get_cors_settings()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_settings["allow_origins"],
+    allow_origin_regex=cors_settings.get("allow_origin_regex"),
     allow_credentials=cors_settings["allow_credentials"],
     allow_methods=cors_settings["allow_methods"],
     allow_headers=cors_settings["allow_headers"],
