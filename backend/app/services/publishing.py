@@ -15,7 +15,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from app.database.models import Content, PostStatus as DBPostStatus
+from app.database.models import Content, ContentStatus, PostStatus as DBPostStatus
 from app.services.content import ContentService
 from app.services.media import MediaService
 from app.services.social_publisher import SocialPublisher
@@ -173,6 +173,9 @@ def publish_content(
             )
 
     if db_content:
+        overall = summarize_statuses(responses)
+        if overall in ("published", "partial"):
+            db_content.status = ContentStatus.PUBLISHED
         db.commit()
 
     return responses

@@ -345,7 +345,7 @@ export default function ContentGenerationForm({ onGenerate }: ContentGenerationF
         const payload: Record<string, unknown> = {
           content_id: content.content_id,
           platforms: [content.platform],
-          draft_mode: draftMode,
+          draft_mode: false,
           override_title: edited?.title ?? null,
           override_body: edited?.body ?? null,
           requested_by: requestedBy || null,

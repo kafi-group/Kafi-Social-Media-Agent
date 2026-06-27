@@ -19,7 +19,7 @@ from app.database.models import (
     Content,
     ContentStatus,
 )
-from app.services.publishing import publish_content
+from app.services.publishing import publish_content, summarize_statuses
 from app.utils.logger import logger
 
 DEFAULT_REJECT_NOTE = "Rejected by the designer"
@@ -69,11 +69,12 @@ def approve(db: Session, approval: ApprovalRequest) -> list[dict]:
     if approval.status != ApprovalStatus.PENDING:
         raise ApprovalError(f"Request already {approval.status.value}")
 
+    # Designer approval always publishes live — ignore stored draft_mode flag.
     results = publish_content(
         db=db,
         content_id=approval.content_id,
         platforms=approval.platforms or [],
-        draft_mode=bool(approval.draft_mode),
+        draft_mode=False,
         override_title=approval.override_title,
         override_body=approval.override_body,
         linkedin_account_labels=approval.linkedin_account_labels,
@@ -85,7 +86,11 @@ def approve(db: Session, approval: ApprovalRequest) -> list[dict]:
 
     content = db.query(Content).filter(Content.id == approval.content_id).first()
     if content:
-        content.status = ContentStatus.APPROVED
+        overall = summarize_statuses(results)
+        if overall in ("published", "partial"):
+            content.status = ContentStatus.PUBLISHED
+        else:
+            content.status = ContentStatus.APPROVED
 
     db.commit()
     db.refresh(approval)

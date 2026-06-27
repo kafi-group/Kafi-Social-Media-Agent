@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { API_ENDPOINTS, apiFetch, fetchWithTimeout } from '@/lib/api-client';
+import PostFromDraftPanel from '@/components/dashboard/PostFromDraftPanel';
 
 interface ContentItem {
   id: number;
@@ -402,6 +403,9 @@ export default function DashboardPage() {
                         </>
                       ) : (
                         <p className="text-sm text-gray-400 italic">No caption body</p>
+                      )}
+                      {!isPosted(content) && (
+                        <PostFromDraftPanel content={content} onPosted={loadDashboard} />
                       )}
                     </div>
                   </div>

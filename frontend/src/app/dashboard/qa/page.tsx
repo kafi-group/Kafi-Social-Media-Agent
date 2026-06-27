@@ -157,7 +157,7 @@ export default function QAPage() {
       <div className="mb-6">
         <h1 className="text-3xl font-bold text-slate-900">QA Checker</h1>
         <p className="text-slate-500 mt-1">
-          Review posts submitted by the team. Approve to publish, or reject to block.
+          Review posts submitted by the team. Approve to publish live to the selected platforms, or reject to block.
         </p>
       </div>
 
@@ -371,7 +371,7 @@ export default function QAPage() {
                               disabled={actioningId === a.id}
                               className="px-4 py-2 rounded-lg bg-green-600 text-white text-sm font-medium hover:bg-green-700 disabled:bg-slate-300"
                             >
-                              {actioningId === a.id ? 'Approving...' : '✓ Approve & Post'}
+                              {actioningId === a.id ? 'Publishing...' : '✓ Approve & Publish Live'}
                             </button>
                             <button
                               onClick={() => {
