@@ -200,9 +200,6 @@ class Settings(BaseSettings):
     # backend/.internal_api_key on first startup. Set explicitly in production.
     INTERNAL_API_KEY: str = ""
 
-    # Approval email magic-link expiry (hours). Links older than this are rejected.
-    APPROVAL_TOKEN_EXPIRE_HOURS: int = 48
-
     # PIN brute-force protection: lock out an IP after this many failed attempts …
     PIN_MAX_ATTEMPTS: int = 5
     # … for this many minutes.
@@ -258,23 +255,11 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "uploads"
     MAX_UPLOAD_SIZE_MB: int = 50
 
-    # Designer Approval Workflow
+    # Designer Approval Workflow (QA Checker)
     # When True, non-designers must get a post approved by the designer before it
     # publishes. Designers prove identity with DESIGNER_PIN to post directly.
     APPROVAL_REQUIRED: bool = True
     DESIGNER_PIN: str = ""  # shared secret; empty disables direct posting
-    DESIGNER_EMAIL: str = ""  # where approval-request emails are sent
-    # Public base URL of the backend, used to build media URLs and the
-    # approve/reject links inside approval emails.
-    BACKEND_PUBLIC_URL: str = "http://localhost:8000"
-
-    # SMTP (Gmail) settings for approval emails
-    SMTP_HOST: str = "smtp.gmail.com"
-    SMTP_PORT: int = 587
-    SMTP_USERNAME: str = ""
-    SMTP_PASSWORD: str = ""  # Gmail App Password (not your normal password)
-    SMTP_FROM: str = ""  # defaults to SMTP_USERNAME when empty
-    SMTP_USE_TLS: bool = True
 
     class Config:
         env_file = ".env"

@@ -8,21 +8,19 @@ GET  /approvals                   - list approval requests (queue + history)
 GET  /approvals/{id}              - approval request detail
 POST /approvals/{id}/approve      - approve & publish (requires PIN)
 POST /approvals/{id}/reject       - reject (requires PIN)
-GET  /approvals/review/{token}    - one-click approve/reject from email
 
 Security:
   - PIN verification is rate-limited (5 attempts / minute per IP) and has an
     in-memory lockout (configurable via PIN_MAX_ATTEMPTS / PIN_LOCKOUT_MINUTES).
-  - Email review tokens expire after APPROVAL_TOKEN_EXPIRE_HOURS (default 48 h).
   - All route-level error detail strings avoid leaking internal state.
 """
 
 import secrets
 import threading
 from datetime import datetime, timedelta
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
@@ -38,12 +36,14 @@ from app.schemas.approval import (
     PinVerifyResponse,
     RejectRequest,
 )
-from app.services import approval_service, email_service
+from app.services import approval_service
 from app.services.approval_service import ApprovalError
+from app.services.media import MediaService
 from app.utils.logger import logger
 from app.utils.sanitize import safe_error_detail
 
 router = APIRouter()
+media_service = MediaService()
 
 # ── PIN brute-force protection ─────────────────────────────────────────────────
 # Tracks failed PIN attempts per IP address.  Uses a threading.Lock so it is
@@ -80,6 +80,16 @@ def verify_pin(pin: str) -> bool:
     return secrets.compare_digest(str(pin), str(settings.DESIGNER_PIN))
 
 
+def _public_media_url(media_path: Optional[str]) -> Optional[str]:
+    if not media_path:
+        return None
+    try:
+        return media_service.get_public_url(media_path)
+    except Exception as e:
+        logger.warning(f"Could not resolve media URL for {media_path}: {e}")
+        return None
+
+
 def _to_response(approval: ApprovalRequest, db: Session) -> ApprovalResponse:
     """Merge an approval row with a snapshot of its content for the review UI."""
     content = db.query(Content).filter(Content.id == approval.content_id).first()
@@ -101,7 +111,7 @@ def _to_response(approval: ApprovalRequest, db: Session) -> ApprovalResponse:
         body=approval.override_body or (content.body if content else None),
         media_path=content.media_path if content else None,
         media_type=(content.media_type.value if content and content.media_type else None),
-        media_url=email_service.public_media_url(content.media_path) if content else None,
+        media_url=_public_media_url(content.media_path) if content else None,
         platform=(content.platform.value if content and content.platform else None),
     )
 
@@ -137,10 +147,7 @@ def get_approval_stats(db: Session = Depends(get_db)):
 @router.get("/approvals/config", response_model=ApprovalConfigResponse)
 async def get_approval_config():
     """Public config the frontend uses to decide whether to show the gate."""
-    return ApprovalConfigResponse(
-        approval_required=settings.APPROVAL_REQUIRED,
-        designer_email_configured=email_service.is_email_configured(),
-    )
+    return ApprovalConfigResponse(approval_required=settings.APPROVAL_REQUIRED)
 
 
 @router.post("/designer/verify-pin", response_model=PinVerifyResponse)
@@ -181,7 +188,7 @@ async def create_approval(
     body: ApprovalCreateRequest,
     db: Session = Depends(get_db),
 ):
-    """Submit a post for designer approval and email the designer."""
+    """Submit a post for designer approval via the QA Checker queue."""
     try:
         approval = approval_service.create_request(
             db,
@@ -298,98 +305,3 @@ async def reject_request(
     except Exception as e:
         logger.error(f"Reject error: {e}")
         raise HTTPException(status_code=500, detail=safe_error_detail(e, "Failed to reject request"))
-
-
-def _result_page(title: str, message: str, color: str) -> str:
-    return f"""\
-<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><title>{title}</title></head>
-<body style="font-family:Arial,Helvetica,sans-serif;background:#f1f5f9;margin:0;padding:48px;">
-  <div style="max-width:480px;margin:0 auto;background:#fff;border-radius:12px;
-              border:1px solid #e2e8f0;padding:32px;text-align:center;">
-    <div style="font-size:48px;margin-bottom:12px;">{('✅' if color == 'green' else '🛑')}</div>
-    <h1 style="color:{('#16a34a' if color == 'green' else '#dc2626')};font-size:22px;margin:0 0 8px;">{title}</h1>
-    <p style="color:#475569;font-size:15px;margin:0;">{message}</p>
-  </div>
-</body>
-</html>
-"""
-
-
-@router.get("/approvals/review/{token}", response_class=HTMLResponse)
-@limiter.limit("20/minute")
-async def review_via_email(
-    request: Request,
-    token: str,
-    action: str = Query(..., description="approve or reject"),
-    db: Session = Depends(get_db),
-):
-    """
-    One-click approve/reject from the email link.
-
-    Security checks:
-      1. Token must exist in the database.
-      2. Token must not have expired (review_token_expires_at).
-      3. The approval must still be in PENDING state.
-    """
-    approval = (
-        db.query(ApprovalRequest).filter(ApprovalRequest.review_token == token).first()
-    )
-    if not approval:
-        return HTMLResponse(
-            _result_page("Link not valid", "This approval link is invalid or has expired.", "red"),
-            status_code=404,
-        )
-
-    # ── Token expiry check ───────────────────────────────────────────────────
-    if approval.review_token_expires_at and datetime.utcnow() > approval.review_token_expires_at:
-        return HTMLResponse(
-            _result_page(
-                "Link expired",
-                "This approval link has expired. Please ask the submitter to re-submit.",
-                "red",
-            ),
-            status_code=410,
-        )
-
-    if approval.status != ApprovalStatus.PENDING:
-        return HTMLResponse(
-            _result_page(
-                "Already decided",
-                f"This post was already {approval.status.value}.",
-                "red" if approval.status == ApprovalStatus.REJECTED else "green",
-            )
-        )
-
-    action = action.lower()
-    if action == "approve":
-        try:
-            approval_service.approve(db, approval)
-            return HTMLResponse(
-                _result_page(
-                    "Approved & posted",
-                    "The post has been published to the selected platforms.",
-                    "green",
-                )
-            )
-        except Exception as e:
-            logger.error(f"Email approve error: {e}")
-            return HTMLResponse(
-                _result_page("Could not post", "Approval processing failed. Check the QA queue.", "red"),
-                status_code=500,
-            )
-    elif action == "reject":
-        approval_service.reject(db, approval)
-        return HTMLResponse(
-            _result_page(
-                "Rejected",
-                "The post was rejected and will not be published.",
-                "red",
-            )
-        )
-
-    return HTMLResponse(
-        _result_page("Invalid action", "The link action must be 'approve' or 'reject'.", "red"),
-        status_code=400,
-    )

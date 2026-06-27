@@ -2,25 +2,23 @@
 Approval Service
 Designer-approval workflow: create requests, approve (publish), reject.
 
-When a non-designer posts, an ApprovalRequest is created and the designer is
-emailed. On approval the stored posting config is published verbatim via the
-shared publish_content() so it behaves identically to a normal post.
+When a non-designer posts, an ApprovalRequest is created for the QA Checker.
+On approval the stored posting config is published verbatim via the shared
+publish_content() so it behaves identically to a normal post.
 """
 
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.database.models import (
     ApprovalRequest,
     ApprovalStatus,
     Content,
     ContentStatus,
 )
-from app.services import email_service
 from app.services.publishing import publish_content
 from app.utils.logger import logger
 
@@ -42,14 +40,11 @@ def create_request(
     linkedin_account_labels: Optional[list[str]] = None,
     requested_by: Optional[str] = None,
 ) -> ApprovalRequest:
-    """Create a pending approval request and email the designer."""
+    """Create a pending approval request for the QA Checker queue."""
     content = db.query(Content).filter(Content.id == content_id).first()
     if not content:
         raise ApprovalError(f"Content {content_id} not found")
 
-    token_expires = datetime.utcnow() + timedelta(
-        hours=settings.APPROVAL_TOKEN_EXPIRE_HOURS
-    )
     approval = ApprovalRequest(
         content_id=content_id,
         status=ApprovalStatus.PENDING,
@@ -60,26 +55,12 @@ def create_request(
         linkedin_account_labels=linkedin_account_labels,
         requested_by=requested_by,
         review_token=secrets.token_urlsafe(32),
-        review_token_expires_at=token_expires,
+        review_token_expires_at=None,
     )
     db.add(approval)
     db.commit()
     db.refresh(approval)
-
-    # Email is best-effort; the request still lives in the in-app queue.
-    try:
-        email_service.send_approval_request(
-            token=approval.review_token,
-            title=override_title or content.title,
-            body=override_body or content.body,
-            platforms=platforms or [],
-            media_path=content.media_path,
-            media_type=content.media_type.value if content.media_type else None,
-            requested_by=requested_by,
-        )
-    except Exception as e:
-        logger.error(f"Approval email send failed for request {approval.id}: {e}")
-
+    logger.info(f"Approval request {approval.id} queued for QA review")
     return approval
 
 

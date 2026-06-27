@@ -5,13 +5,12 @@ from fastapi.responses import JSONResponse
 
 from app.services import auth_service
 
-# Paths that stay public (OAuth callbacks, health, email review links).
+# Paths that stay public (OAuth callbacks, health).
 _PUBLIC_PREFIXES = (
     "/api/v1/health",
     "/api/v1/auth/login",
     "/api/v1/auth/youtube",
     "/api/v1/auth/meta",
-    "/api/v1/approvals/review/",
 )
 
 

@@ -5,7 +5,6 @@ import { API_ENDPOINTS, apiFetch } from '@/lib/api-client';
 
 interface DesignerGateModalProps {
   open: boolean;
-  emailConfigured: boolean;
   submitting: boolean;
   onClose: () => void;
   onConfirmDesigner: (pin: string) => void;
@@ -16,7 +15,6 @@ type Mode = 'choose' | 'designer' | 'requester';
 
 export default function DesignerGateModal({
   open,
-  emailConfigured,
   submitting,
   onClose,
   onConfirmDesigner,
@@ -150,8 +148,7 @@ export default function DesignerGateModal({
           <>
             <h2 className="text-xl font-bold text-slate-900 mb-1">Send for approval</h2>
             <p className="text-sm text-slate-500 mb-4">
-              The designer will review this post
-              {emailConfigured ? ' by email' : ' in the QA Checker'} and approve or reject it.
+              The designer will review this post in the QA Checker and approve or reject it.
               It will only be published after approval.
             </p>
             <label className="block text-sm font-medium text-slate-700 mb-1">

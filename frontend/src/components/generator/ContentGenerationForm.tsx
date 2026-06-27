@@ -71,7 +71,6 @@ export default function ContentGenerationForm({ onGenerate }: ContentGenerationF
 
   // Designer approval gate
   const [approvalRequired, setApprovalRequired] = useState(false);
-  const [emailConfigured, setEmailConfigured] = useState(false);
   const [gateOpen, setGateOpen] = useState(false);
   const [submittingApproval, setSubmittingApproval] = useState(false);
   const [approvalSubmitted, setApprovalSubmitted] = useState(false);
@@ -163,7 +162,6 @@ export default function ContentGenerationForm({ onGenerate }: ContentGenerationF
       .then((cfg) => {
         if (cancelled || !cfg) return;
         setApprovalRequired(Boolean(cfg.approval_required));
-        setEmailConfigured(Boolean(cfg.designer_email_configured));
       })
       .catch(() => {
         /* gate stays off if config can't load */
@@ -728,9 +726,7 @@ export default function ContentGenerationForm({ onGenerate }: ContentGenerationF
             <div className="mb-4 bg-blue-50 border border-blue-200 text-blue-800 rounded-lg px-4 py-3">
               <p className="font-semibold">Sent to the designer for approval ✅</p>
               <p className="text-sm mt-0.5">
-                This post won&apos;t be published until the designer approves it
-                {emailConfigured ? ' (an email was sent to them)' : ''}. You can track
-                its status in the QA Checker.
+                This post won&apos;t be published until the designer approves it in the QA Checker.
               </p>
             </div>
           )}
@@ -781,7 +777,6 @@ export default function ContentGenerationForm({ onGenerate }: ContentGenerationF
 
           <DesignerGateModal
             open={gateOpen}
-            emailConfigured={emailConfigured}
             submitting={submittingApproval}
             onClose={() => setGateOpen(false)}
             onConfirmDesigner={(pin) => doPost(pin)}

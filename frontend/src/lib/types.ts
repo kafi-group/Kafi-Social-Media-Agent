@@ -213,7 +213,6 @@ export type ApprovalStatus = 'pending' | 'approved' | 'rejected';
 
 export interface ApprovalConfig {
   approval_required: boolean;
-  designer_email_configured: boolean;
 }
 
 export interface ApprovalCreateRequest {

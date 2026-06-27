@@ -65,7 +65,6 @@ class ApprovalConfigResponse(BaseModel):
     """Public approval config used by the frontend gate."""
 
     approval_required: bool
-    designer_email_configured: bool
 
 
 class PinVerifyResponse(BaseModel):

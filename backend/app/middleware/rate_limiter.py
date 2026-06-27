@@ -4,7 +4,6 @@ Rate Limiter Configuration (slowapi)
 Per-IP rate limits to prevent:
   - DoS / resource exhaustion against LLM endpoints
   - Brute-force attacks against the PIN verification endpoint
-  - Abuse of approval email one-click links
 
 Usage in route files:
     from app.middleware.rate_limiter import limiter
