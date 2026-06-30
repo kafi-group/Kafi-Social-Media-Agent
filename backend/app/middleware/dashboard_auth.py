@@ -10,6 +10,7 @@ _PUBLIC_PREFIXES = (
     "/api/v1/health",
     "/api/v1/auth/login",
     "/api/v1/auth/youtube",
+    "/api/v1/auth/linkedin",
     "/api/v1/auth/meta",
 )
 

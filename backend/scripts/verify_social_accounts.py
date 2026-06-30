@@ -167,9 +167,39 @@ def verify_youtube() -> None:
     print()
 
 
+def verify_meta() -> None:
+    print("=" * 60)
+    print("FACEBOOK + INSTAGRAM (no live posts)")
+    print("=" * 60)
+    from app.services.social_publisher import fetch_connected_account_details
+
+    details = fetch_connected_account_details()
+    fb = details.get("facebook") or {}
+    ig = details.get("instagram") or {}
+
+    if fb.get("name"):
+        match = "matches" if fb.get("id_matches") else "MISMATCH"
+        print(f"Facebook Page: {fb.get('name')} (id={fb.get('id')}) — .env {match}")
+    elif settings.FACEBOOK_PAGE_ID:
+        print(f"Facebook Page: could not verify ({fb.get('error', 'unknown error')})")
+    else:
+        print("Facebook: NOT configured")
+
+    if ig and ig.get("id"):
+        label = f"@{ig.get('username')}" if ig.get("username") else ig.get("name")
+        match = "matches" if ig.get("id_matches") else "MISMATCH"
+        print(f"Instagram: {label} (id={ig.get('id')}) — .env {match}")
+    elif settings.INSTAGRAM_ACCOUNT_ID:
+        print("Instagram: configured in .env but could not resolve linked Business account")
+    else:
+        print("Instagram: NOT configured")
+    print()
+
+
 def main() -> None:
     print(f"DRAFT_MODE: {settings.DRAFT_MODE}\n")
     verify_linkedin()
+    verify_meta()
     verify_youtube()
 
 

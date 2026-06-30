@@ -18,24 +18,109 @@ import {
   Users,
   Clapperboard,
   Sparkles,
+  ImageIcon,
+  Paperclip,
+  X,
 } from 'lucide-react';
-import { API_ENDPOINTS, apiFetch, fetchWithTimeout } from '@/lib/api-client';
+import { API_ENDPOINTS, API_CONFIG, apiFetch, fetchWithTimeout } from '@/lib/api-client';
+import { useSpeechToText } from '@/hooks/useSpeechToText';
 import type {
   ChatMessage,
   ChatResponse,
+  CreationIntent,
   CreationModelsResponse,
+  ImageGenerateResponse,
   MatchedProduct,
+  VoiceGenerateResponse,
 } from '@/lib/types';
 
+const CREATION_MODES: {
+  id: CreationIntent;
+  label: string;
+  icon: typeof ImageIcon;
+  description: string;
+  placeholder: string;
+}[] = [
+  {
+    id: 'create_image',
+    label: 'Create image',
+    icon: ImageIcon,
+    description: 'Generate a product image in-app — no prompt text shown',
+    placeholder:
+      'Describe the shot — e.g. Essence mango pickle 330g glass jar, studio packshot, white background, Instagram feed…',
+  },
+  {
+    id: 'create_voice',
+    label: 'Create voice',
+    icon: Mic,
+    description: 'Write a voice-over script — click Generate voice when ready',
+    placeholder:
+      'Describe the voice-over — e.g. 20s promo for Himalayan pink salt, warm and trustworthy tone…',
+  },
+  {
+    id: 'prompt',
+    label: 'Write prompt',
+    icon: Sparkles,
+    description: 'Copy-paste prompt for Meta AI or Google Flow — text only',
+    placeholder:
+      'Ask for a prompt — product, packaging, platform, mood, image or video…',
+  },
+];
+
 const META_AI_FALLBACK_URL = 'https://www.meta.ai/';
-const GEMINI_WEB_FALLBACK_URL = 'https://gemini.google.com/app';
-const ELEVENLABS_FALLBACK_URL = 'https://elevenlabs.io/app/speech-synthesis/text-to-speech';
 const GOOGLE_FLOW_CHARACTERS_FALLBACK_URL =
   'https://labs.google/fx/tools/flow/project/cc16a3ce-33ec-4248-bb1a-3341c7817479/characters';
 const GOOGLE_FLOW_FINAL_PRODUCT_FALLBACK_URL =
   'https://labs.google/fx/tools/flow/project/0b5aa7ed-bd40-490d-af9a-24208f855710';
 
-// Category colour map for the product card badge
+const MAX_REFERENCE_IMAGE_BYTES = 4 * 1024 * 1024;
+const ALLOWED_REFERENCE_IMAGE_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+]);
+
+interface PendingAttachment {
+  previewUrl: string;
+  base64: string;
+  mimeType: string;
+  name: string;
+}
+
+function stripDataUrlPrefix(dataUrl: string): string {
+  const comma = dataUrl.indexOf(',');
+  return comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+}
+
+function readImageFile(
+  file: File
+): Promise<{ base64: string; previewUrl: string; mimeType: string }> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      resolve({
+        base64: stripDataUrlPrefix(result),
+        previewUrl: result,
+        mimeType: file.type,
+      });
+    };
+    reader.onerror = () => reject(new Error('Could not read image'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function toApiMessages(messages: ExtendedChatMessage[]): ChatMessage[] {
+  return messages.map((m) => {
+    const entry: ChatMessage = { role: m.role, content: m.content };
+    if (m.image_base64) {
+      entry.image_base64 = m.image_base64;
+      entry.image_mime_type = m.image_mime_type ?? 'image/jpeg';
+    }
+    return entry;
+  });
+}
 const CATEGORY_COLOURS: Record<string, string> = {
   'Pickles': 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300',
   'Chutneys': 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300',
@@ -115,6 +200,9 @@ function ProductCard({ product }: { product: MatchedProduct }) {
 
 interface ExtendedChatMessage extends ChatMessage {
   matchedProduct?: MatchedProduct | null;
+  generatedImageUrl?: string | null;
+  generatedAudioUrl?: string | null;
+  intent?: CreationIntent;
 }
 
 // ---------------------------------------------------------------------------
@@ -124,8 +212,6 @@ interface ExtendedChatMessage extends ChatMessage {
 export default function ChatInterface() {
   const [modelLabel, setModelLabel] = useState<string>('Loading…');
   const [metaAiUrl, setMetaAiUrl] = useState<string>(META_AI_FALLBACK_URL);
-  const [geminiWebUrl, setGeminiWebUrl] = useState<string>(GEMINI_WEB_FALLBACK_URL);
-  const [elevenLabsUrl, setElevenLabsUrl] = useState<string>(ELEVENLABS_FALLBACK_URL);
   const [googleFlowCharactersUrl, setGoogleFlowCharactersUrl] = useState<string>(
     GOOGLE_FLOW_CHARACTERS_FALLBACK_URL
   );
@@ -133,13 +219,50 @@ export default function ChatInterface() {
     GOOGLE_FLOW_FINAL_PRODUCT_FALLBACK_URL
   );
   const [chatReady, setChatReady] = useState<boolean>(true);
+  const [imageReady, setImageReady] = useState<boolean>(false);
+  const [voiceMoods, setVoiceMoods] = useState<{ id: string; label: string }[]>([]);
+  const [voiceMood, setVoiceMood] = useState<string>('professional');
+  const [creationIntent, setCreationIntent] = useState<CreationIntent>('create_image');
+
+  const activeMode =
+    CREATION_MODES.find((m) => m.id === creationIntent) ?? CREATION_MODES[0];
 
   const [messages, setMessages] = useState<ExtendedChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [generatingImageIndex, setGeneratingImageIndex] = useState<number | null>(null);
+  const [generatingVoiceIndex, setGeneratingVoiceIndex] = useState<number | null>(null);
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  const [pendingAttachment, setPendingAttachment] = useState<PendingAttachment | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const appendFinalTranscript = React.useCallback((text: string) => {
+    setInput((prev) => {
+      const base = prev.trimEnd();
+      const addition = text.trim();
+      if (!addition) return prev;
+      return base ? `${base} ${addition}` : addition;
+    });
+  }, []);
+
+  const {
+    isListening,
+    isSupported: speechSupported,
+    toggleListening,
+    stopListening: stopSpeechListening,
+  } = useSpeechToText({
+    lang: 'en-US',
+    onFinalTranscript: appendFinalTranscript,
+    onError: (message) => toast.error(message),
+  });
+
+  useEffect(() => {
+    if (sending && isListening) {
+      stopSpeechListening();
+    }
+  }, [sending, isListening, stopSpeechListening]);
 
   useEffect(() => {
     const loadModels = async () => {
@@ -149,8 +272,6 @@ export default function ChatInterface() {
         const data: CreationModelsResponse = await res.json();
         setModelLabel(data.models[0]?.label ?? 'AI Assistant');
         setMetaAiUrl(data.meta_ai_web_url || META_AI_FALLBACK_URL);
-        setGeminiWebUrl(data.gemini_web_url || GEMINI_WEB_FALLBACK_URL);
-        setElevenLabsUrl(data.elevenlabs_web_url || ELEVENLABS_FALLBACK_URL);
         setGoogleFlowCharactersUrl(
           data.google_flow_characters_url || GOOGLE_FLOW_CHARACTERS_FALLBACK_URL
         );
@@ -158,6 +279,8 @@ export default function ChatInterface() {
           data.google_flow_final_product_url || GOOGLE_FLOW_FINAL_PRODUCT_FALLBACK_URL
         );
         setChatReady(data.chat_ready);
+        setImageReady(Boolean(data.image_ready));
+        setVoiceMoods(data.voice_moods ?? []);
       } catch {
         toast.error('Could not load AI models. Is the backend running?');
       }
@@ -171,7 +294,8 @@ export default function ChatInterface() {
 
   const sendMessage = async () => {
     const text = input.trim();
-    if (!text || sending) return;
+    const hasAttachment = Boolean(pendingAttachment);
+    if ((!text && !hasAttachment) || sending) return;
 
     if (!chatReady) {
       toast.error(
@@ -180,10 +304,23 @@ export default function ChatInterface() {
       return;
     }
 
-    const userMsg: ExtendedChatMessage = { role: 'user', content: text };
+    const userMsg: ExtendedChatMessage = {
+      role: 'user',
+      content:
+        text ||
+        'Analyze the attached reference image and write a detailed Essence product marketing prompt that matches its style.',
+      ...(pendingAttachment
+        ? {
+            image_base64: pendingAttachment.base64,
+            image_mime_type: pendingAttachment.mimeType,
+            image_preview_url: pendingAttachment.previewUrl,
+          }
+        : {}),
+    };
     const nextMessages = [...messages, userMsg];
     setMessages(nextMessages);
     setInput('');
+    setPendingAttachment(null);
     setSending(true);
 
     try {
@@ -192,7 +329,8 @@ export default function ChatInterface() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: '',
-          messages: nextMessages.map((m) => ({ role: m.role, content: m.content })),
+          intent: creationIntent,
+          messages: toApiMessages(nextMessages),
         }),
       });
       if (!res.ok) {
@@ -204,8 +342,14 @@ export default function ChatInterface() {
         role: 'assistant',
         content: data.reply,
         matchedProduct: data.matched_product ?? null,
+        intent: creationIntent,
       };
+      const assistantIndex = nextMessages.length;
       setMessages((prev) => [...prev, assistantMsg]);
+
+      if (creationIntent === 'create_image' && imageReady) {
+        void runGenerateImage(assistantIndex, data.reply);
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Chat request failed';
       toast.error(msg);
@@ -222,20 +366,85 @@ export default function ChatInterface() {
     window.open(metaAiUrl, '_blank', 'noopener,noreferrer');
   };
 
-  const openGoogleGemini = () => {
-    window.open(geminiWebUrl, '_blank', 'noopener,noreferrer');
-  };
-
-  const openElevenLabs = () => {
-    window.open(elevenLabsUrl, '_blank', 'noopener,noreferrer');
-  };
-
   const openGoogleFlowCharacters = () => {
     window.open(googleFlowCharactersUrl, '_blank', 'noopener,noreferrer');
   };
 
   const openGoogleFlowFinalProduct = () => {
     window.open(googleFlowFinalProductUrl, '_blank', 'noopener,noreferrer');
+  };
+
+  const runGenerateImage = async (index: number, promptText: string) => {
+    if (!imageReady) {
+      toast.error(
+        'Image API not configured. Set IMAGE_PROVIDER=cloudflare (or modelslab/gemini) and the matching keys in backend .env, then restart.'
+      );
+      return;
+    }
+
+    setGeneratingImageIndex(index);
+    try {
+      const res = await apiFetch(API_ENDPOINTS.CREATION_GENERATE_IMAGE, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: promptText }),
+        signal: AbortSignal.timeout(API_CONFIG.timeout),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(typeof err.detail === 'string' ? err.detail : 'Image generation failed');
+      }
+      const data: ImageGenerateResponse = await res.json();
+      setMessages((prev) =>
+        prev.map((m, i) =>
+          i === index ? { ...m, generatedImageUrl: data.media_url } : m
+        )
+      );
+      toast.success('Image generated in-app');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Image generation failed');
+    } finally {
+      setGeneratingImageIndex(null);
+    }
+  };
+
+  const runGenerateVoice = async (index: number, scriptText: string) => {
+    setGeneratingVoiceIndex(index);
+    try {
+      const res = await apiFetch(API_ENDPOINTS.CREATION_GENERATE_VOICE, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: scriptText, mood: voiceMood }),
+        signal: AbortSignal.timeout(API_CONFIG.timeout),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(typeof err.detail === 'string' ? err.detail : 'Voice generation failed');
+      }
+      const data: VoiceGenerateResponse = await res.json();
+      setMessages((prev) =>
+        prev.map((m, i) =>
+          i === index ? { ...m, generatedAudioUrl: data.media_url } : m
+        )
+      );
+      toast.success('Voice-over generated in-app');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Voice generation failed');
+    } finally {
+      setGeneratingVoiceIndex(null);
+    }
+  };
+
+  const generateImage = async (index: number) => {
+    const msg = messages[index];
+    if (!msg || msg.role !== 'assistant') return;
+    await runGenerateImage(index, msg.content);
+  };
+
+  const generateVoice = async (index: number) => {
+    const msg = messages[index];
+    if (!msg || msg.role !== 'assistant') return;
+    await runGenerateVoice(index, msg.content);
   };
 
   const copyMessage = async (text: string, index: number) => {
@@ -253,6 +462,41 @@ export default function ChatInterface() {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
+    }
+  };
+
+  const clearPendingAttachment = () => {
+    setPendingAttachment(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  const handleImageFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!ALLOWED_REFERENCE_IMAGE_TYPES.has(file.type)) {
+      toast.error('Use JPEG, PNG, WebP, or GIF.');
+      e.target.value = '';
+      return;
+    }
+    if (file.size > MAX_REFERENCE_IMAGE_BYTES) {
+      toast.error('Image must be under 4 MB.');
+      e.target.value = '';
+      return;
+    }
+
+    try {
+      const { base64, previewUrl, mimeType } = await readImageFile(file);
+      setPendingAttachment({
+        base64,
+        previewUrl,
+        mimeType,
+        name: file.name,
+      });
+    } catch {
+      toast.error('Could not read image file.');
     }
   };
 
@@ -274,14 +518,20 @@ export default function ChatInterface() {
           <Video className="w-4 h-4" />
           Video in Meta AI
         </button>
-        <button
-          onClick={openElevenLabs}
-          className="inline-flex shrink-0 items-center gap-1.5 text-sm font-medium text-brand-700 hover:text-brand-900 border border-brand-200 hover:bg-brand-50 rounded-lg px-3 py-1.5 transition-colors dark:text-gold-300 dark:hover:text-gold-200 dark:border-slate-500 dark:hover:bg-slate-700"
-          title="Add voice-over with ElevenLabs text-to-speech"
-        >
-          <Mic className="w-4 h-4" />
-          Add Voice-Over In ElevenLabs
-        </button>
+        {voiceMoods.length > 0 && (
+          <select
+            value={voiceMood}
+            onChange={(e) => setVoiceMood(e.target.value)}
+            className="shrink-0 text-sm rounded-lg border border-brand-200 bg-white px-2 py-1.5 text-brand-800 dark:bg-slate-700 dark:border-slate-500 dark:text-slate-100"
+            title="Voice-over mood for in-app generation"
+          >
+            {voiceMoods.map((m) => (
+              <option key={m.id} value={m.id}>
+                Voice: {m.label}
+              </option>
+            ))}
+          </select>
+        )}
         <button
           onClick={openGoogleFlowCharacters}
           className="inline-flex shrink-0 items-center gap-1.5 text-sm font-medium text-brand-700 hover:text-brand-900 border border-brand-200 hover:bg-brand-50 rounded-lg px-3 py-1.5 transition-colors dark:text-gold-300 dark:hover:text-gold-200 dark:border-slate-500 dark:hover:bg-slate-700"
@@ -311,51 +561,30 @@ export default function ChatInterface() {
         )}
       </div>
 
-      {/* Prompt Management */}
-      <div className="px-4 py-3 border-b border-slate-200 bg-gradient-to-r from-blue-50 via-indigo-50 to-violet-50 dark:border-slate-600 dark:from-slate-800 dark:via-slate-800 dark:to-slate-900">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="min-w-0">
-            <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-              Prompt Management
-            </h3>
-            <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
-              Chat with Gemini here, then copy prompts and open Google Gemini to refine or generate
-              images and video.
-            </p>
-          </div>
-          <button
-            onClick={openGoogleGemini}
-            className="inline-flex shrink-0 items-center gap-1.5 text-sm font-medium text-indigo-700 hover:text-indigo-900 border border-indigo-200 hover:bg-indigo-50 rounded-lg px-3 py-1.5 transition-colors dark:text-indigo-300 dark:hover:text-indigo-200 dark:border-indigo-700/60 dark:hover:bg-indigo-950/40"
-            title="Open Google Gemini web app"
-          >
-            <Sparkles className="w-4 h-4" />
-            Open Google Gemini
-          </button>
-        </div>
-      </div>
-
       {/* Messages */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.length === 0 && (
           <div className="h-full flex flex-col items-center justify-center text-center text-slate-400">
             <Bot className="w-12 h-12 mb-3 text-slate-300" />
             <p className="text-sm max-w-md mb-4">
-              Your <strong>Essence</strong> prompt engineer — ask for Meta AI image or video prompts
-              for any product. Packaging and catalog details are built in; you get copy-paste-ready
-              prompts for generation.
+              Select a mode below — <strong>Create image</strong> generates visuals in-app,{' '}
+              <strong>Create voice</strong> writes a script you can turn into audio, and{' '}
+              <strong>Write prompt</strong> gives copy-paste text for Meta AI or Flow.
             </p>
             {/* Quick-start suggestions */}
             <div className="flex flex-wrap justify-center gap-2 text-xs">
               {[
-                'Image prompt: mango pickle 330g glass jar — studio packshot for Instagram',
-                'Video prompt: Himalayan pink salt — 15s lifestyle reel',
-                'Amazon listing image: garlic paste 1kg PET bottle, white background',
-                '3 banner options for fried onions pouch — export catalog',
-                'Hero shot: mint chutney glass jar with fresh herbs',
+                'Essence mango pickle 330g glass jar — studio packshot for Instagram',
+                'Himalayan pink salt pouch — lifestyle kitchen scene',
+                'Garlic paste 1kg PET bottle — Amazon listing white background',
               ].map((q) => (
                 <button
                   key={q}
-                  onClick={() => setInput(q)}
+                  type="button"
+                  onClick={() => {
+                    setCreationIntent('create_image');
+                    setInput(q);
+                  }}
                   className="px-3 py-1.5 rounded-full border border-slate-200 hover:border-brand-300 hover:text-brand-700 hover:bg-brand-50 transition-colors dark:border-slate-600 dark:hover:border-brand-500 dark:hover:text-gold-300"
                 >
                   {q}
@@ -367,6 +596,8 @@ export default function ChatInterface() {
 
         {messages.map((msg, index) => {
           const isUser = msg.role === 'user';
+          const msgIntent = msg.intent ?? 'prompt';
+          const showTextBubble = isUser || msgIntent !== 'create_image';
           return (
             <div key={index} className={`flex gap-3 ${isUser ? 'justify-end' : 'justify-start'}`}>
               {!isUser && (
@@ -381,7 +612,52 @@ export default function ChatInterface() {
                   <ProductCard product={msg.matchedProduct} />
                 )}
 
+                {!isUser && generatingImageIndex === index && (
+                  <div className="text-xs text-brand-700 dark:text-gold-300 flex items-center gap-1.5">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    Generating image in-app…
+                  </div>
+                )}
+                {!isUser && generatingVoiceIndex === index && (
+                  <div className="text-xs text-brand-700 dark:text-gold-300 flex items-center gap-1.5">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    Generating voice-over…
+                  </div>
+                )}
+
+                {/* Generated media previews */}
+                {!isUser && msg.generatedImageUrl && (
+                  <div className="rounded-xl overflow-hidden border border-slate-200 dark:border-slate-600 max-w-sm">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={msg.generatedImageUrl}
+                      alt="Generated product visual"
+                      className="w-full h-auto object-contain bg-white dark:bg-slate-900"
+                    />
+                  </div>
+                )}
+                {!isUser && msg.generatedAudioUrl && (
+                  <div className="rounded-xl border border-slate-200 dark:border-slate-600 p-3 bg-white dark:bg-slate-900 max-w-sm">
+                    <p className="text-xs font-medium text-slate-600 dark:text-slate-300 mb-2 flex items-center gap-1">
+                      <Mic className="w-3.5 h-3.5" />
+                      Voice-over
+                    </p>
+                    <audio controls src={msg.generatedAudioUrl} className="w-full" />
+                  </div>
+                )}
+
                 {/* Chat bubble */}
+                {isUser && msg.image_preview_url && (
+                  <div className="rounded-xl overflow-hidden border border-brand-200 dark:border-slate-500 max-w-xs">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={msg.image_preview_url}
+                      alt="Reference attachment"
+                      className="w-full h-auto max-h-48 object-contain bg-white dark:bg-slate-900"
+                    />
+                  </div>
+                )}
+                {showTextBubble && (
                 <div
                   className={`group relative rounded-2xl px-4 py-2.5 text-sm ${
                     isUser
@@ -405,6 +681,42 @@ export default function ChatInterface() {
                     )}
                   </button>
                 </div>
+                )}
+
+                {!isUser && msgIntent === 'create_image' && (
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => generateImage(index)}
+                      disabled={generatingImageIndex === index || !imageReady}
+                      className="inline-flex items-center gap-1 text-xs font-medium rounded-lg px-2.5 py-1.5 border border-brand-200 text-brand-700 hover:bg-brand-50 disabled:opacity-50 dark:border-slate-500 dark:text-gold-300 dark:hover:bg-slate-700"
+                    >
+                      {generatingImageIndex === index ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <ImageIcon className="w-3.5 h-3.5" />
+                      )}
+                      Regenerate image
+                    </button>
+                  </div>
+                )}
+                {!isUser && msgIntent === 'create_voice' && (
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => generateVoice(index)}
+                      disabled={generatingVoiceIndex === index}
+                      className="inline-flex items-center gap-1 text-xs font-medium rounded-lg px-2.5 py-1.5 border border-brand-200 text-brand-700 hover:bg-brand-50 disabled:opacity-50 dark:border-slate-500 dark:text-gold-300 dark:hover:bg-slate-700"
+                    >
+                      {generatingVoiceIndex === index ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Mic className="w-3.5 h-3.5" />
+                      )}
+                      Generate voice
+                    </button>
+                  </div>
+                )}
               </div>
 
               {isUser && (
@@ -423,35 +735,150 @@ export default function ChatInterface() {
             </div>
             <div className="bg-slate-100 text-slate-500 rounded-2xl rounded-bl-sm px-4 py-2.5 text-sm inline-flex items-center gap-2 dark:bg-slate-700 dark:text-slate-300">
               <Loader2 className="w-4 h-4 animate-spin" />
-              Thinking…
+              {creationIntent === 'create_image' ? 'Preparing your image…' : 'Thinking…'}
             </div>
           </div>
         )}
       </div>
 
       {/* Composer */}
-      <div className="border-t border-slate-200 dark:border-slate-600 p-4">
+      <div className="border-t border-slate-200 dark:border-slate-600 p-4 space-y-3">
+        <div>
+          <p className="text-xs font-medium text-slate-600 dark:text-slate-400 mb-2">
+            What do you want to create?
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {CREATION_MODES.map((mode) => {
+              const Icon = mode.icon;
+              const selected = creationIntent === mode.id;
+              return (
+                <button
+                  key={mode.id}
+                  type="button"
+                  onClick={() => setCreationIntent(mode.id)}
+                  title={mode.description}
+                  className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors ${
+                    selected
+                      ? 'border-brand-600 bg-brand-50 text-brand-800 ring-2 ring-brand-500/20 dark:border-gold-400 dark:bg-brand-900/50 dark:text-gold-200'
+                      : 'border-slate-200 text-slate-600 hover:border-brand-300 hover:bg-slate-50 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700'
+                  }`}
+                >
+                  <Icon className="w-3.5 h-3.5" />
+                  {mode.label}
+                </button>
+              );
+            })}
+          </div>
+          <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-400">{activeMode.description}</p>
+        </div>
+
         <div className="flex items-end gap-2">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/jpeg,image/png,image/webp,image/gif"
+            className="hidden"
+            onChange={handleImageFileChange}
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={sending || isListening}
+            className="inline-flex shrink-0 items-center justify-center rounded-lg border border-slate-300 p-2.5 text-slate-600 hover:bg-slate-50 hover:text-brand-700 disabled:opacity-50 dark:border-slate-500 dark:text-slate-300 dark:hover:bg-slate-700"
+            title="Attach reference image for vision-based prompt writing"
+          >
+            <Paperclip className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              if (!speechSupported) {
+                toast.error(
+                  'Voice typing needs Chrome or Edge. Type your prompt or use another browser.'
+                );
+                return;
+              }
+              toggleListening();
+            }}
+            disabled={sending}
+            className={`inline-flex shrink-0 items-center justify-center rounded-lg border p-2.5 transition-colors disabled:opacity-50 ${
+              isListening
+                ? 'border-red-400 bg-red-50 text-red-600 animate-pulse dark:border-red-500 dark:bg-red-950/40 dark:text-red-400'
+                : 'border-slate-300 text-slate-600 hover:bg-slate-50 hover:text-brand-700 dark:border-slate-500 dark:text-slate-300 dark:hover:bg-slate-700'
+            }`}
+            title={
+              isListening
+                ? 'Stop voice typing'
+                : 'Speak your prompt — text appears in the box (Chrome / Edge)'
+            }
+          >
+            <Mic className="w-4 h-4" />
+          </button>
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="e.g. Image prompt for Essence mango pickle glass jar — bright studio packshot for Instagram feed…"
+            placeholder={
+              isListening
+                ? 'Listening… speak your prompt, then click the mic to stop.'
+                : pendingAttachment
+                  ? 'Describe the Essence product to adapt to this reference (optional)…'
+                  : activeMode.placeholder
+            }
             rows={2}
             className="flex-1 resize-none rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 dark:bg-slate-700 dark:border-slate-500 dark:text-slate-100 dark:placeholder-slate-400"
             disabled={sending}
           />
           <button
             onClick={sendMessage}
-            disabled={sending || !input.trim()}
+            disabled={sending || (!input.trim() && !pendingAttachment)}
             className="inline-flex items-center gap-1.5 text-sm font-medium rounded-lg px-4 py-2.5 bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             <Send className="w-4 h-4" />
-            Send
+            {creationIntent === 'create_image' && !pendingAttachment ? 'Create' : 'Send'}
           </button>
         </div>
-        <p className="mt-2 text-xs text-slate-400">
-          Press Enter to send. Requests image/video prompts for Meta AI — product catalog is used automatically.
+        {pendingAttachment && (
+          <div className="flex items-center gap-3 rounded-lg border border-brand-200 bg-brand-50/80 px-3 py-2 dark:border-slate-500 dark:bg-slate-700/60">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={pendingAttachment.previewUrl}
+              alt="Pending reference"
+              className="h-14 w-14 rounded-md object-cover border border-slate-200 dark:border-slate-500"
+            />
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-medium text-slate-700 dark:text-slate-200 truncate">
+                {pendingAttachment.name}
+              </p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Reference image — AI uses it to craft your{' '}
+                {creationIntent === 'create_image' ? 'generated visual' : 'prompt'}.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={clearPendingAttachment}
+              className="shrink-0 rounded-full p-1 text-slate-500 hover:bg-white hover:text-red-600 dark:hover:bg-slate-600"
+              title="Remove attachment"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+        {isListening && (
+          <p className="text-xs text-red-600 dark:text-red-400 flex items-center gap-1.5">
+            <span className="inline-block w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+            Voice typing active — speak clearly, then click the mic again to stop. Click Send when
+            ready.
+          </p>
+        )}
+        <p className="text-xs text-slate-400">
+          {creationIntent === 'create_image' &&
+            'Create image — describe your shot; the image appears below (no prompt text).'}
+          {creationIntent === 'create_voice' &&
+            'Create voice — AI writes the script; click Generate voice when you are ready.'}
+          {creationIntent === 'prompt' &&
+            'Write prompt — copy the reply for Meta AI or Google Flow. No in-app generation.'}
         </p>
       </div>
     </div>

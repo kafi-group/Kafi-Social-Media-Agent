@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.database.models import Content, ContentStatus, PostStatus as DBPostStatus
 from app.services.content import ContentService
 from app.services.media import MediaService
+from app.config import settings
 from app.services.social_publisher import SocialPublisher
 from app.utils.logger import logger
 
@@ -115,6 +116,7 @@ def publish_content(
         media_relative_path=content.get("media_path"),
         media_url=media_supabase_url,
         tags=youtube_tags,
+        privacy_status=settings.YOUTUBE_DEFAULT_PRIVACY_STATUS,
         linkedin_account_labels=linkedin_account_labels,
     )
 

@@ -49,7 +49,7 @@ export default function ContentGenerationForm({ onGenerate }: ContentGenerationF
   const [postingStates, setPostingStates] = useState<Record<string, 'idle' | 'posting' | 'done' | 'error' | 'partial'>>({});
   const [postResults, setPostResults] = useState<SocialPostResponse[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [draftMode, setDraftMode] = useState(true); // Start in draft/test mode by default
+  const [draftMode, setDraftMode] = useState(false);
 
   // LinkedIn multi-account selection
   const [linkedinAccounts, setLinkedinAccounts] = useState<LinkedInAccountInfo[]>([]);

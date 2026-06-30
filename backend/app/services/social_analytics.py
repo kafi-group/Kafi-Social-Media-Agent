@@ -23,8 +23,8 @@ PlatformStatus = str
 class SocialAnalyticsService:
     """Account-level analytics client for all supported social platforms."""
 
-    # LinkedIn: use v2 API for org stats (REST versioned endpoint requires Partner API access)
-    LINKEDIN_V2_URL = "https://api.linkedin.com/v2"
+    # LinkedIn: REST API for org stats (requires rw_organization_admin — see /api/v1/auth/linkedin)
+    LINKEDIN_REST_URL = "https://api.linkedin.com/rest"
     YOUTUBE_TOKEN_URL = "https://oauth2.googleapis.com/token"
     YOUTUBE_ANALYTICS_URL = "https://youtubeanalytics.googleapis.com/v2/reports"
     REQUEST_TIMEOUT = 10  # seconds — keep dashboard loads snappy
@@ -99,40 +99,66 @@ class SocialAnalyticsService:
             )
 
     def _linkedin_analytics(self, days: int) -> dict:
-        organization_id = settings.LINKEDIN_ORGANIZATION_ID.strip()
-        access_token = settings.LINKEDIN_ACCESS_TOKEN.strip()
+        from app.services.linkedin_oauth import (
+            LINKEDIN_REST_URL,
+            linkedin_rest_headers,
+            organization_urn,
+            resolve_analytics_token,
+            token_has_org_analytics_scope,
+            token_scope_set,
+        )
 
-        if not organization_id or not access_token:
+        organization_id = settings.LINKEDIN_ORGANIZATION_ID.strip()
+        access_token, token_source = resolve_analytics_token()
+
+        if not organization_id:
             return self._response(
                 platform="linkedin",
                 days=days,
                 status="not_configured",
                 message=(
-                    "LinkedIn organization analytics needs LINKEDIN_ORGANIZATION_ID "
-                    "and an access token with organization analytics scopes."
+                    "LinkedIn organization analytics needs LINKEDIN_ORGANIZATION_ID. "
+                    "Run: python scripts/lookup_linkedin_organizations.py"
                 ),
             )
 
-        organization_urn = (
-            organization_id
-            if organization_id.startswith("urn:li:")
-            else f"urn:li:organization:{organization_id}"
-        )
+        if not access_token:
+            return self._response(
+                platform="linkedin",
+                days=days,
+                status="not_configured",
+                message=(
+                    "LinkedIn organization analytics needs a token with rw_organization_admin. "
+                    "Visit http://localhost:8000/api/v1/auth/linkedin to authorize."
+                ),
+            )
+
+        if not token_has_org_analytics_scope(access_token):
+            scopes = ", ".join(sorted(token_scope_set(access_token))) or "(none)"
+            return self._response(
+                platform="linkedin",
+                days=days,
+                status="permission_error",
+                message=(
+                    f"Token from {token_source} lacks organization analytics scope "
+                    f"(needs rw_organization_admin). Current scopes: {scopes}. "
+                    "Enable Marketing Developer Platform on your LinkedIn app, then visit "
+                    "/api/v1/auth/linkedin and save the token as "
+                    "LINKEDIN_ORGANIZATION_ACCESS_TOKEN."
+                ),
+            )
+
+        organization_urn_value = organization_urn(organization_id)
         start_ms, end_ms = self._range_ms(days)
 
-        # Use the v2 API — the REST versioned endpoint requires LinkedIn Partner API access
-        # which most developer apps do not have.
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "X-Restli-Protocol-Version": "2.0.0",
-        }
+        headers = linkedin_rest_headers(access_token)
 
         response = requests.get(
-            f"{self.LINKEDIN_V2_URL}/organizationalEntityShareStatistics",
+            f"{LINKEDIN_REST_URL}/organizationalEntityShareStatistics",
             headers=headers,
             params={
                 "q": "organizationalEntity",
-                "organizationalEntity": organization_urn,
+                "organizationalEntity": organization_urn_value,
                 "timeIntervals.timeGranularityType": "DAY",
                 "timeIntervals.timeRange.start": start_ms,
                 "timeIntervals.timeRange.end": end_ms,
@@ -147,30 +173,18 @@ class SocialAnalyticsService:
             except Exception:
                 err_body = {}
 
-            service_err = err_body.get("serviceErrorCode") or err_body.get("code", "")
             message_text = err_body.get("message", response.text[:300])
 
-            # Partner API restriction or insufficient scope
-            if status_code == 403:
-                if "partnerApi" in str(message_text) or service_err in (100,):
-                    return self._response(
-                        platform="linkedin",
-                        days=days,
-                        status="permission_error",
-                        message=(
-                            "LinkedIn organization analytics requires the "
-                            "r_organization_social OAuth scope AND the "
-                            "'Marketing Developer Platform' product enabled on your LinkedIn "
-                            "app. Enable it at https://developer.linkedin.com, then "
-                            "re-authorize to get a token with that scope."
-                        ),
-                    )
             if status_code in (401, 403):
                 return self._response(
                     platform="linkedin",
                     days=days,
                     status="permission_error",
-                    message=f"LinkedIn access denied: {message_text}",
+                    message=(
+                        f"LinkedIn access denied: {message_text} "
+                        "Re-authorize at /api/v1/auth/linkedin with a company page "
+                        "Administrator account and set LINKEDIN_ORGANIZATION_ACCESS_TOKEN."
+                    ),
                 )
 
             return self._response(

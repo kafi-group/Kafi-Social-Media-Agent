@@ -21,7 +21,7 @@ from app.middleware.dashboard_auth import dashboard_auth_middleware
 from app.middleware.security import SecurityHeadersMiddleware
 from app.routes import (
     health, content, calendar, analytics, qa,
-    scraper, rival, youtube_auth, meta_auth, social, creation, approval, auth,
+    scraper, rival, youtube_auth, meta_auth, linkedin_auth, social, creation, approval, auth,
 )
 from app.services import auth_service
 
@@ -166,6 +166,9 @@ app.mount("/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
 app.include_router(auth.router,     prefix="/api/v1", tags=["Auth"])
 app.include_router(health.router,   prefix="/api/v1", tags=["Health"])
 app.include_router(creation.router, prefix="/api/v1", tags=["Content Creation"])
+app.include_router(youtube_auth.router, prefix="/api/v1", tags=["YouTube Auth"])
+app.include_router(linkedin_auth.router, prefix="/api/v1", tags=["LinkedIn Auth"])
+app.include_router(meta_auth.router,    prefix="/api/v1", tags=["Meta Auth"])
 
 if settings.APP_MODE == "full":
     app.include_router(content.router,      prefix="/api/v1", tags=["Content"])
@@ -175,8 +178,6 @@ if settings.APP_MODE == "full":
     app.include_router(approval.router,     prefix="/api/v1", tags=["Approvals"])
     app.include_router(scraper.router,      prefix="/api/v1", tags=["Scraper"])
     app.include_router(rival.router,        prefix="/api/v1", tags=["Rival Review"])
-    app.include_router(youtube_auth.router, prefix="/api/v1", tags=["YouTube Auth"])
-    app.include_router(meta_auth.router,    prefix="/api/v1", tags=["Meta Auth"])
     app.include_router(social.router,       prefix="/api/v1", tags=["Social"])
 
 

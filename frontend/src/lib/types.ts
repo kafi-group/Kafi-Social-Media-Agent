@@ -362,11 +362,19 @@ export type ChatRole = 'system' | 'user' | 'assistant';
 export interface ChatMessage {
   role: ChatRole;
   content: string;
+  /** Base64 reference image for vision-based prompt writing (user messages). */
+  image_base64?: string | null;
+  image_mime_type?: string | null;
+  /** Local preview URL (client-only, not sent to API). */
+  image_preview_url?: string | null;
 }
+
+export type CreationIntent = 'prompt' | 'create_image' | 'create_voice' | 'video_prompt';
 
 export interface ChatRequest {
   model: string;
-  messages: { role: ChatRole; content: string }[];
+  intent?: CreationIntent;
+  messages: ChatMessage[];
 }
 
 export interface MatchedProduct {
@@ -382,6 +390,7 @@ export interface ChatResponse {
   model: string;
   reply: string;
   matched_product?: MatchedProduct | null;
+  intent?: CreationIntent;
 }
 
 export interface CreationModel {
@@ -397,4 +406,23 @@ export interface CreationModelsResponse {
   google_flow_characters_url?: string;
   google_flow_final_product_url?: string;
   chat_ready: boolean;
+  image_ready?: boolean;
+  image_model?: string;
+  voice_ready?: boolean;
+  voice_moods?: { id: string; label: string }[];
+}
+
+export interface ImageGenerateResponse {
+  media_path: string;
+  media_url: string;
+  model: string;
+  caption?: string | null;
+}
+
+export interface VoiceGenerateResponse {
+  media_path: string;
+  media_url: string;
+  mood: string;
+  voice: string;
+  script_preview: string;
 }

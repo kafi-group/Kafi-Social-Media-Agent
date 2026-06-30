@@ -58,6 +58,8 @@ export const API_ENDPOINTS = {
   // Content Creation (chatbot)
   CREATION_MODELS: `${API_BASE_URL}/api/${API_VERSION}/creation/models`,
   CREATION_CHAT: `${API_BASE_URL}/api/${API_VERSION}/creation/chat`,
+  CREATION_GENERATE_IMAGE: `${API_BASE_URL}/api/${API_VERSION}/creation/generate-image`,
+  CREATION_GENERATE_VOICE: `${API_BASE_URL}/api/${API_VERSION}/creation/generate-voice`,
 
   // QA
   QA_CHECK: `${API_BASE_URL}/api/${API_VERSION}/qa/check`,

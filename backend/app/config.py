@@ -107,7 +107,35 @@ class Settings(BaseSettings):
     # Optional full model chain (comma-separated). When empty, primary + fallback above are used.
     CREATION_GEMINI_MODELS: str = ""
 
-    # Content Creation - Gemini web app deep link (image/video are created in Gemini)
+    # Content Creation — image generation
+    # IMAGE_PROVIDER: gemini | modelslab | cloudflare (Workers AI, free tier)
+    IMAGE_PROVIDER: Literal["gemini", "modelslab", "cloudflare"] = "gemini"
+    # Gemini — separate Google account / API key recommended
+    IMAGE_GEMINI_API_KEY: str = ""
+    IMAGE_GEMINI_MODEL: str = "gemini-2.5-flash-image"
+    IMAGE_GEMINI_FALLBACK_MODEL: str = "gemini-3.1-flash-image-preview"
+    IMAGE_GEMINI_TIMEOUT: int = 180
+    # ModelsLab — https://modelslab.com (free tier ~100 calls/day, no card)
+    MODELSLAB_API_KEY: str = ""
+    MODELSLAB_IMAGE_MODEL: str = "hidream-o1"
+    MODELSLAB_IMAGE_WIDTH: int = 1024
+    MODELSLAB_IMAGE_HEIGHT: int = 1024
+    MODELSLAB_INFERENCE_STEPS: int = 31
+    MODELSLAB_GUIDANCE_SCALE: float = 7.5
+    MODELSLAB_CLIP_SKIP: int = 2
+    MODELSLAB_NEGATIVE_PROMPT: str = (
+        "blurry, low quality, distorted, deformed, watermark, ugly, bad anatomy"
+    )
+    MODELSLAB_IMAGE_TIMEOUT: int = 180
+
+    # Cloudflare Workers AI — https://developers.cloudflare.com/workers-ai/
+    CLOUDFLARE_ACCOUNT_ID: str = ""
+    CLOUDFLARE_API_TOKEN: str = ""
+    CLOUDFLARE_IMAGE_MODEL: str = "@cf/black-forest-labs/flux-1-schnell"
+    CLOUDFLARE_IMAGE_STEPS: int = 4
+    CLOUDFLARE_IMAGE_TIMEOUT: int = 120
+
+    # Content Creation - Gemini web app deep link (optional fallback for manual edits)
     GEMINI_WEB_URL: str = "https://gemini.google.com/app"
     # Meta AI — where the team pastes generated image/video prompts
     META_AI_WEB_URL: str = "https://www.meta.ai/"
@@ -223,8 +251,17 @@ class Settings(BaseSettings):
     LINKEDIN_ACCOUNT_3_ACCESS_TOKEN: str = ""
     LINKEDIN_ACCOUNT_3_PERSON_ID: str = ""
     LINKEDIN_ORGANIZATION_ID: str = ""
+    # Dedicated token for company-page analytics (rw_organization_admin scope).
+    # Obtain via /api/v1/auth/linkedin — separate from personal posting tokens.
+    LINKEDIN_ORGANIZATION_ACCESS_TOKEN: str = ""
     LINKEDIN_CLIENT_ID: str = ""
     LINKEDIN_CLIENT_SECRET: str = ""
+    LINKEDIN_REDIRECT_URI: str = "http://localhost:8000/api/v1/auth/linkedin/callback"
+    LINKEDIN_OAUTH_SCOPES: str = (
+        # Analytics only — do not add w_organization_social unless LinkedIn approved it
+        # for your app under Marketing Developer Platform.
+        "openid profile email rw_organization_admin"
+    )
     FACEBOOK_APP_ID: str = ""
     FACEBOOK_APP_SECRET: str = ""
     FACEBOOK_PAGE_ID: str = ""
@@ -240,6 +277,8 @@ class Settings(BaseSettings):
     YOUTUBE_REDIRECT_URI: str = "http://localhost:8000/api/v1/auth/youtube/callback"
     YOUTUBE_CHANNEL_ID: str = ""
     YOUTUBE_VIDEO_CATEGORY_ID: str = "22"  # 22 = People & Blogs (default)
+    # YouTube upload visibility: private | unlisted | public
+    YOUTUBE_DEFAULT_PRIVACY_STATUS: str = "public"
     # Scopes required for upload + analytics (comma-separated in .env)
     YOUTUBE_OAUTH_SCOPES: str = (
         "https://www.googleapis.com/auth/youtube.upload,"
@@ -301,3 +340,47 @@ def get_creation_gemini_models() -> list[str]:
         if name and name not in ordered:
             ordered.append(name)
     return ordered
+
+
+def get_image_gemini_api_key() -> str:
+    """Dedicated API key for Prompt Studio image generation."""
+    return settings.IMAGE_GEMINI_API_KEY.strip()
+
+
+def get_image_gemini_models() -> list[str]:
+    """Gemini image models, in failover order."""
+    ordered: list[str] = []
+    for model in (settings.IMAGE_GEMINI_MODEL, settings.IMAGE_GEMINI_FALLBACK_MODEL):
+        name = model.strip()
+        if name and name not in ordered:
+            ordered.append(name)
+    return ordered
+
+
+def is_image_generation_ready() -> bool:
+    """True when the configured IMAGE_PROVIDER has credentials."""
+    provider = (settings.IMAGE_PROVIDER or "gemini").strip().lower()
+    if provider == "modelslab":
+        return bool(settings.MODELSLAB_API_KEY.strip())
+    if provider == "gemini":
+        return bool(get_image_gemini_api_key())
+    if provider == "cloudflare":
+        return bool(
+            settings.CLOUDFLARE_ACCOUNT_ID.strip()
+            and settings.CLOUDFLARE_API_TOKEN.strip()
+        )
+    return False
+
+
+def get_image_generation_model_label() -> str:
+    """Human-readable label for the active image provider/model."""
+    provider = (settings.IMAGE_PROVIDER or "gemini").strip().lower()
+    if provider == "modelslab":
+        model = settings.MODELSLAB_IMAGE_MODEL.strip() or "hidream-o1"
+        return f"ModelsLab {model}"
+    if provider == "cloudflare":
+        model = settings.CLOUDFLARE_IMAGE_MODEL.strip() or "@cf/black-forest-labs/flux-1-schnell"
+        short = model.split("/")[-1] if "/" in model else model
+        return f"Cloudflare {short}"
+    model = settings.IMAGE_GEMINI_MODEL.strip() or "gemini"
+    return model.replace("gemini-", "Gemini ").replace("-", " ").title()

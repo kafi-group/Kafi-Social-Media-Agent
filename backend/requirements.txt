@@ -38,6 +38,9 @@ aiohttp>=3.9
 slowapi>=0.1.9          # Rate limiting (DoS / brute-force protection)
 PyJWT>=2.8                # Dashboard JWT login
 
+# Prompt Studio — free voice-over (Microsoft Edge TTS)
+edge-tts>=7.0
+
 # Dev & Testing
 pytest>=7.4
 pytest-asyncio>=0.21

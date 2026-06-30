@@ -1018,6 +1018,35 @@ class YouTubeClient:
             and self.refresh_token
         )
 
+    def _resolve_oauth_channel(self, access_token: str) -> Optional[dict]:
+        """Return the YouTube channel tied to this OAuth token (upload target)."""
+        try:
+            response = requests.get(
+                "https://www.googleapis.com/youtube/v3/channels",
+                params={"part": "snippet", "mine": "true"},
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=20,
+            )
+            if not response.ok:
+                logger.warning(
+                    f"YouTube channel lookup failed: {response.status_code} "
+                    f"{response.text[:200]}"
+                )
+                return None
+            items = response.json().get("items", [])
+            if not items:
+                return None
+            channel = items[0]
+            snippet = channel.get("snippet", {})
+            return {
+                "id": channel.get("id", ""),
+                "title": snippet.get("title", ""),
+                "custom_url": snippet.get("customUrl", ""),
+            }
+        except requests.RequestException as exc:
+            logger.warning(f"YouTube channel lookup error: {exc}")
+            return None
+
     def _refresh_access_token(self) -> Optional[str]:
         """
         Exchange the refresh token for a new access token.
@@ -1070,7 +1099,7 @@ class YouTubeClient:
         title: str,
         description: str,
         tags: Optional[list[str]] = None,
-        privacy_status: str = "private",  # private, unlisted, public
+        privacy_status: Optional[str] = None,  # private, unlisted, public
     ) -> dict:
         """
         Upload a video to YouTube using the resumable upload protocol.
@@ -1080,11 +1109,13 @@ class YouTubeClient:
             title: Video title
             description: Video description (optionally with hashtags)
             tags: List of tags/keywords for the video
-            privacy_status: 'private', 'unlisted', or 'public' (default: private for safety)
+            privacy_status: 'private', 'unlisted', or 'public' (defaults to YOUTUBE_DEFAULT_PRIVACY_STATUS)
 
         Returns:
             Dict with status, video_id, video_url, error_message
         """
+        privacy_status = privacy_status or settings.YOUTUBE_DEFAULT_PRIVACY_STATUS
+
         if self.draft_mode:
             logger.info(
                 f"[DRAFT] YouTube video would be uploaded:\n"
@@ -1128,6 +1159,36 @@ class YouTubeClient:
                     "post_url": None,
                     "error_message": "Failed to obtain YouTube access token. Check YOUTUBE_REFRESH_TOKEN.",
                 }
+
+            oauth_channel = self._resolve_oauth_channel(token)
+            configured_channel_id = self.channel_id.strip()
+            if oauth_channel and configured_channel_id:
+                oauth_id = oauth_channel.get("id", "")
+                if oauth_id and oauth_id != configured_channel_id:
+                    label = (
+                        oauth_channel.get("title", "").strip()
+                        or oauth_channel.get("custom_url")
+                        or oauth_id
+                    )
+                    error_message = (
+                        f"Upload blocked: your refresh token is tied to '{label}' ({oauth_id}), "
+                        f"but YOUTUBE_CHANNEL_ID is set to {configured_channel_id}. "
+                        "Revoke the app at https://myaccount.google.com/permissions, switch to "
+                        "the correct channel in YouTube (Essence Food), then re-authorize at "
+                        "/api/v1/auth/youtube in an incognito window."
+                    )
+                    logger.error(error_message)
+                    return {
+                        "status": "failed",
+                        "post_id": None,
+                        "post_url": None,
+                        "error_message": error_message,
+                    }
+                logger.info(
+                    "YouTube upload target channel: %s (%s)",
+                    oauth_channel.get("title", oauth_id),
+                    oauth_id,
+                )
 
             auth_header = {"Authorization": f"Bearer {token}"}
 
@@ -1252,12 +1313,13 @@ class YouTubeClient:
 
             logger.info(f"YouTube video uploaded successfully: {video_id} ({video_url})")
 
-            return {
+            result = {
                 "status": "published",
                 "post_id": video_id,
                 "post_url": video_url,
                 "error_message": None,
             }
+            return result
 
         except requests.exceptions.Timeout:
             logger.error("YouTube video upload timed out (file may be too large)")
@@ -1317,7 +1379,7 @@ class SocialPublisher:
         media_relative_path: Optional[str] = None,
         media_url: Optional[str] = None,
         tags: Optional[list[str]] = None,
-        privacy_status: str = "private",
+        privacy_status: Optional[str] = None,
         linkedin_account_labels: Optional[list[str]] = None,
     ) -> dict[str, dict]:
         """
@@ -1337,6 +1399,7 @@ class SocialPublisher:
         Returns:
             Dict mapping platform names to their posting results
         """
+        youtube_privacy = privacy_status or settings.YOUTUBE_DEFAULT_PRIVACY_STATUS
         results = {}
         for platform in platforms:
             try:
@@ -1345,7 +1408,7 @@ class SocialPublisher:
                     media_relative_path=media_relative_path,
                     media_url=media_url,
                     tags=tags,
-                    privacy_status=privacy_status,
+                    privacy_status=youtube_privacy,
                     linkedin_account_labels=linkedin_account_labels,
                 )
             except Exception as e:
@@ -1368,7 +1431,7 @@ class SocialPublisher:
         media_relative_path: Optional[str] = None,
         media_url: Optional[str] = None,
         tags: Optional[list[str]] = None,
-        privacy_status: str = "private",
+        privacy_status: Optional[str] = None,
         linkedin_account_labels: Optional[list[str]] = None,
     ) -> dict:
         """
@@ -1419,7 +1482,7 @@ class SocialPublisher:
                 title=title,
                 description=body,
                 tags=tags,
-                privacy_status=privacy_status,
+                privacy_status=privacy_status or settings.YOUTUBE_DEFAULT_PRIVACY_STATUS,
             )
         else:
             return {
@@ -1509,3 +1572,98 @@ class SocialPublisher:
             "instagram": self.instagram.is_configured,
             "youtube": self.youtube.is_configured,
         }
+
+
+def fetch_connected_account_details() -> dict:
+    """
+    Resolve human-readable account names for configured platforms (no secrets).
+    Used by Settings to confirm live posting targets the correct accounts.
+    """
+    from app.config import settings
+
+    details: dict = {
+        "draft_mode": settings.DRAFT_MODE,
+        "facebook": None,
+        "instagram": None,
+        "youtube": None,
+    }
+
+    graph_version = (settings.META_GRAPH_API_VERSION or "v21.0").strip()
+    graph_url = f"https://graph.facebook.com/{graph_version}"
+    page_id = (settings.FACEBOOK_PAGE_ID or "").strip()
+    page_token = (settings.FACEBOOK_PAGE_ACCESS_TOKEN or "").strip()
+
+    if page_id and page_token:
+        try:
+            page_resp = requests.get(
+                f"{graph_url}/{page_id}",
+                params={
+                    "fields": "name,id,instagram_business_account{id,username,name}",
+                    "access_token": page_token,
+                },
+                timeout=15,
+            )
+            if page_resp.ok:
+                page_data = page_resp.json()
+                details["facebook"] = {
+                    "id": page_data.get("id", page_id),
+                    "name": page_data.get("name"),
+                    "configured_id": page_id,
+                    "id_matches": str(page_data.get("id", "")) == page_id,
+                }
+                ig_data = page_data.get("instagram_business_account") or {}
+                if isinstance(ig_data, dict) and ig_data.get("id"):
+                    configured_ig = (settings.INSTAGRAM_ACCOUNT_ID or "").strip()
+                    details["instagram"] = {
+                        "id": ig_data.get("id"),
+                        "username": ig_data.get("username"),
+                        "name": ig_data.get("name"),
+                        "configured_id": configured_ig,
+                        "id_matches": str(ig_data.get("id", "")) == configured_ig
+                        if configured_ig
+                        else None,
+                    }
+            else:
+                details["facebook"] = {
+                    "id": page_id,
+                    "name": None,
+                    "error": "Could not verify Facebook Page token",
+                }
+        except requests.RequestException as exc:
+            logger.warning(f"Facebook account lookup failed: {exc}")
+            details["facebook"] = {"id": page_id, "name": None, "error": str(exc)}
+
+    yt_client = YouTubeClient(draft_mode=False)
+    if yt_client.is_configured:
+        try:
+            token = yt_client._refresh_access_token()
+            if token:
+                ch_resp = requests.get(
+                    "https://www.googleapis.com/youtube/v3/channels",
+                    params={"part": "snippet", "mine": "true"},
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=15,
+                )
+                if ch_resp.ok:
+                    items = ch_resp.json().get("items", [])
+                    if items:
+                        channel = items[0]
+                        channel_id = channel.get("id", "")
+                        snippet = channel.get("snippet", {})
+                        configured_id = (settings.YOUTUBE_CHANNEL_ID or "").strip()
+                        details["youtube"] = {
+                            "id": channel_id,
+                            "name": snippet.get("title"),
+                            "custom_url": snippet.get("customUrl"),
+                            "configured_id": configured_id,
+                            "id_matches": configured_id == channel_id if configured_id else None,
+                        }
+                else:
+                    details["youtube"] = {"error": "Could not verify YouTube OAuth token"}
+            else:
+                details["youtube"] = {"error": "YouTube refresh token invalid or expired"}
+        except requests.RequestException as exc:
+            logger.warning(f"YouTube account lookup failed: {exc}")
+            details["youtube"] = {"error": str(exc)}
+
+    return details

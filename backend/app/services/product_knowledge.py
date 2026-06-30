@@ -3,7 +3,7 @@ Product Knowledge Service
 Loads the Kafi Commodities / Essence brand product catalog and provides:
   - product_for_query()       – detect which product a user message is about
   - infer_prompt_media_type()   – guess image vs video from the user's request
-  - build_system_prompt()       – system instruction for the prompt-engineering chatbot
+  - build_system_prompt()       – system instruction for Prompt Studio chatbot
 """
 
 from __future__ import annotations
@@ -12,6 +12,8 @@ import json
 import re
 from pathlib import Path
 from typing import Literal, Optional
+
+from app.schemas.creation import CreationIntent
 
 _CATALOG_PATH = Path(__file__).parent.parent / "data" / "kafi_products.json"
 
@@ -106,35 +108,121 @@ def _format_product_block(product: dict) -> str:
     )
 
 
+def _reference_image_block() -> str:
+    return (
+        "═══ REFERENCE IMAGE ATTACHED (vision) ═══\n"
+        "The user attached a reference image. You CAN see it in their message.\n\n"
+        "YOU MUST:\n"
+        "- Analyze the image: product/packaging, label text, colors, lighting, background, "
+        "composition, camera angle, props, and overall style.\n"
+        "- Write a **Meta AI prompt:** that recreates or adapts that visual for the Essence "
+        "product the user names (or ask ONE short question if the target product is unclear).\n"
+        "- Ground packaging facts in the catalog when a product is identified.\n"
+        "- Output the formatted prompt block only — you are writing a text prompt, NOT generating "
+        "a new image yourself.\n\n"
+        "YOU MUST NEVER:\n"
+        "- Say you cannot see or analyze images.\n"
+        "- Ignore the reference image when the user asked you to match or adapt it.\n\n"
+    )
+
+
+def _intent_mode_block(intent: CreationIntent) -> str:
+    """Strong mode instructions so the model matches the UI the user selected."""
+    if intent == CreationIntent.CREATE_IMAGE:
+        return (
+            "═══ USER SELECTED MODE: CREATE IMAGE (in-app) ═══\n"
+            "The user clicked **Create image**. Your text is NOT shown in the chat — only the "
+            "generated image appears. Prompt Studio sends your **Meta AI prompt:** paragraph "
+            "directly to the image API.\n\n"
+            "YOU MUST:\n"
+            "- Output ONLY the **Meta AI prompt:** block (see OUTPUT FORMAT). No intro, no notes.\n"
+            "- Write one dense image-generation paragraph grounded in catalog packaging facts.\n\n"
+            "YOU MUST NEVER:\n"
+            "- Include a **Voice-over script:** or any narration text.\n"
+            "- Add chit-chat, apologies, or instructions to copy/paste elsewhere.\n"
+            "- Say you cannot generate images.\n\n"
+        )
+    if intent == CreationIntent.CREATE_VOICE:
+        return (
+            "═══ USER SELECTED MODE: CREATE VOICE-OVER ═══\n"
+            "The user clicked **Create voice**. They will see ONLY your narration script in chat. "
+            "They click **Generate voice** separately to hear it — do NOT assume audio is automatic.\n\n"
+            "YOU MUST:\n"
+            "- Output ONLY the **Voice-over script:** block (2–5 sentences, speakable narration).\n"
+            "- Match tone, length, and product facts the user asked for.\n\n"
+            "YOU MUST NEVER:\n"
+            "- Include a **Meta AI prompt:** or image/visual prompt block.\n"
+            "- Redirect to ElevenLabs or external TTS tools.\n\n"
+        )
+    return (
+        "═══ USER SELECTED MODE: WRITE PROMPT ═══\n"
+        "The user wants a copy-paste prompt for Meta AI, Google Flow, or similar tools.\n"
+        "Output ONLY the formatted prompt block — no voice-over script, no in-app generation.\n"
+        "For video/reel requests set **Type:** Video and describe motion and pacing.\n\n"
+    )
+
+
+def _output_format_block(intent: CreationIntent) -> str:
+    """Intent-specific output structure — one output type per mode."""
+    if intent == CreationIntent.CREATE_IMAGE:
+        return (
+            "OUTPUT FORMAT (strict — nothing else):\n"
+            "---\n"
+            "**Meta AI prompt:**\n"
+            "[One dense paragraph for image generation. No bullet lists inside this block.]\n"
+            "---\n"
+        )
+    if intent == CreationIntent.CREATE_VOICE:
+        return (
+            "OUTPUT FORMAT (strict — nothing else):\n"
+            "---\n"
+            "**Voice-over script:**\n"
+            "[2–5 sentences of speakable narration. No stage directions unless brief.]\n"
+            "---\n"
+        )
+    return (
+        "OUTPUT FORMAT:\n"
+        "---\n"
+        "**Product:** [full catalog name]\n"
+        "**Type:** Image | Video\n"
+        "**Use case:** [e.g. Instagram feed, Amazon listing, 15s reel]\n"
+        "**Meta AI prompt:**\n"
+        "[One dense paragraph — copy/paste ready. No bullet lists inside this block.]\n"
+        "**Notes:** [optional, one line max]\n"
+        "---\n"
+        "Do NOT include **Voice-over script:** in this mode.\n"
+    )
+
+
 def build_system_prompt(
     matched_product: Optional[dict] = None,
     media_type: Optional[Literal["image", "video"]] = None,
+    intent: CreationIntent = CreationIntent.PROMPT,
+    has_reference_image: bool = False,
 ) -> str:
     """
     Build the system prompt for the Content Creation chatbot.
-
-    Primary job: craft copy-paste-ready Meta AI prompts for product images and videos,
-    grounded in the Essence catalog (especially packaging formats).
     """
+    reference_block = _reference_image_block() if has_reference_image else ""
+
     media_focus = ""
-    if media_type == "image":
+    if intent == CreationIntent.CREATE_IMAGE or media_type == "image":
         media_focus = (
-            "The user wants an IMAGE prompt. Optimize for a single still frame / packshot / "
-            "marketing visual in Meta AI.\n"
+            "Focus: single still frame / packshot / marketing visual for in-app image generation.\n"
         )
     elif media_type == "video":
         media_focus = (
-            "The user wants a VIDEO prompt. Describe motion, pacing, camera movement, and "
-            "opening/closing frames suitable for Meta AI video generation.\n"
+            "Focus: video prompt — motion, pacing, camera movement, opening/closing frames "
+            "for Meta AI or Google Flow.\n"
         )
+    elif intent == CreationIntent.CREATE_VOICE:
+        media_focus = "Focus: spoken voice-over / narration script for product marketing.\n"
 
     base = (
-        "You are an expert creative prompt engineer for Kafi Commodities (Pvt) Ltd — "
+        "You are the Prompt Studio creative assistant for Kafi Commodities (Pvt) Ltd — "
         "the Pakistani export company behind the **Essence** brand.\n\n"
-        "YOUR PRIMARY JOB:\n"
-        "Write polished, production-ready prompts that the marketing team will COPY and PASTE "
-        "into **Meta AI** to generate product images and short marketing videos.\n"
-        "You do NOT generate images or videos yourself — you only write the prompts.\n\n"
+        f"{reference_block}"
+        f"{_intent_mode_block(intent)}"
         f"{media_focus}"
         "BRAND & VISUAL DIRECTION (Essence):\n"
         "- Premium export-quality food packaging; clean, appetizing, trustworthy.\n"
@@ -157,24 +245,15 @@ def build_system_prompt(
         "7. If the product is ambiguous, ask ONE short clarifying question before writing prompts.\n"
         "8. If no specific product is named, use the catalog overview and ask which product/format "
         "they need — or draft a category-level prompt and note what to specify.\n\n"
-        "OUTPUT FORMAT — use this structure so prompts are easy to copy:\n"
-        "---\n"
-        "**Product:** [full catalog name]\n"
-        "**Type:** Image | Video\n"
-        "**Use case:** [e.g. Instagram feed, Amazon listing, trade-show banner]\n"
-        "**Meta AI prompt:**\n"
-        "[One dense paragraph — ready to paste into Meta AI. No bullet lists inside the prompt block.]\n"
-        "**Notes:** [optional — aspect ratio, packaging variant, or art-direction tweaks]\n"
-        "---\n\n"
-        "Keep assistant chatter outside the prompt block minimal. Lead with the formatted prompt.\n\n"
+        f"{_output_format_block(intent)}\n"
+        "Keep chatter outside the block minimal. Lead with the formatted block.\n\n"
     )
 
     if matched_product:
         product_block = (
             "TARGET PRODUCT (catalog ground truth — use accurately):\n"
             f"{_format_product_block(matched_product)}\n\n"
-            "When writing the Meta AI prompt, reflect the correct packaging line (PET vs glass, "
-            "size, master carton context if relevant) from the list above."
+            "Reflect the correct packaging line (PET vs glass, size) from the list above."
         )
         return base + product_block
 
@@ -184,6 +263,6 @@ def build_system_prompt(
         "PRODUCT CATALOG OVERVIEW — Essence brand categories:\n"
         f"{cat_list}\n\n"
         "No single product was detected in the user's message. Ask which product and packaging "
-        "format they need, or produce a category-level Meta AI prompt and state assumptions clearly."
+        "format they need, or produce a category-level prompt and state assumptions clearly."
     )
     return base + catalog_summary

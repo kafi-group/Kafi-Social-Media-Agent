@@ -37,6 +37,7 @@ REQUIRED_SCOPES = [
     "read_insights",
     "instagram_basic",
     "instagram_manage_insights",
+    "instagram_content_publish",
     "pages_manage_posts",
     "pages_manage_engagement",
 ]
@@ -120,6 +121,54 @@ def _fetch_page_access_token(long_lived_user_token: str, page_id: str) -> tuple[
         logger.warning(f"me/accounts page token fetch error: {exc}")
 
     return "", "", "Could not resolve a Page access token from your Facebook login."
+
+
+def _list_managed_pages(long_lived_user_token: str) -> list[dict]:
+    """Return Facebook Pages the user can manage, with linked Instagram accounts."""
+    graph_url = f"https://graph.facebook.com/{settings.META_GRAPH_API_VERSION}"
+    try:
+        accounts_resp = requests.get(
+            f"{graph_url}/me/accounts",
+            params={
+                "fields": "id,name,access_token,instagram_business_account{id,username,name}",
+                "access_token": long_lived_user_token,
+                "limit": 50,
+            },
+            timeout=30,
+        )
+        if accounts_resp.ok:
+            return accounts_resp.json().get("data", []) or []
+    except requests.RequestException as exc:
+        logger.warning(f"me/accounts listing failed: {exc}")
+    return []
+
+
+def _format_managed_pages_html(pages: list[dict], current_page_id: str) -> str:
+    if not pages:
+        return ""
+    rows = []
+    for page in pages:
+        page_id = str(page.get("id", ""))
+        is_current = page_id == current_page_id.strip()
+        ig = page.get("instagram_business_account") or {}
+        ig_line = ""
+        if isinstance(ig, dict) and ig.get("id"):
+            ig_user = ig.get("username", "")
+            ig_line = (
+                f"<br>Instagram: @{ig_user} "
+                f"(<code>INSTAGRAM_ACCOUNT_ID={ig.get('id')}</code>)"
+            )
+        marker = " <strong>← currently in .env</strong>" if is_current else ""
+        rows.append(
+            f"<li><strong>{page.get('name', 'Page')}</strong>{marker}<br>"
+            f"<code>FACEBOOK_PAGE_ID={page_id}</code>{ig_line}</li>"
+        )
+    return f"""
+          <h3>All Facebook Pages you manage</h3>
+          <p>Pick your <strong>production</strong> page (not a sandbox/test page) and update
+          <code>backend/.env</code> before restarting:</p>
+          <ul>{''.join(rows)}</ul>
+    """
 
 
 def _format_expiry(debug_data: dict) -> str:
@@ -227,6 +276,11 @@ async def meta_auth_callback(
         )
     long_lived_user_token = ll_resp.json().get("access_token", "")
 
+    managed_pages = _list_managed_pages(long_lived_user_token)
+    pages_html = _format_managed_pages_html(
+        managed_pages, settings.FACEBOOK_PAGE_ID or ""
+    )
+
     # Step 3: Get a never-expiring Page access token (required for FB + IG analytics/posting).
     page_token, page_name, page_token_note = _fetch_page_access_token(
         long_lived_user_token,
@@ -258,6 +312,35 @@ async def meta_auth_callback(
     is_valid = debug_data.get("is_valid", "unknown")
     scopes = ", ".join(debug_data.get("scopes", []) or [])
 
+    # Resolve linked Instagram Business account for .env
+    ig_block = ""
+    page_id_for_ig = (settings.FACEBOOK_PAGE_ID or "").strip()
+    if page_id_for_ig and token_to_use:
+        try:
+            graph_url = f"https://graph.facebook.com/{settings.META_GRAPH_API_VERSION}"
+            ig_resp = requests.get(
+                f"{graph_url}/{page_id_for_ig}",
+                params={
+                    "fields": "instagram_business_account{id,username,name}",
+                    "access_token": token_to_use,
+                },
+                timeout=20,
+            )
+            if ig_resp.ok:
+                ig_data = (ig_resp.json().get("instagram_business_account") or {})
+                if isinstance(ig_data, dict) and ig_data.get("id"):
+                    ig_id = ig_data.get("id")
+                    ig_user = ig_data.get("username", "")
+                    ig_name = ig_data.get("name", "")
+                    ig_block = f"""
+          <h3>Instagram Business Account</h3>
+          <p>@{ig_user} ({ig_name}) — ID: <code>{ig_id}</code></p>
+          <p>Set in <code>backend/.env</code>:</p>
+          <pre style="background:#f4f4f4;padding:1rem;overflow:auto">INSTAGRAM_ACCOUNT_ID={ig_id}</pre>
+                    """
+        except requests.RequestException as exc:
+            logger.warning(f"Instagram account lookup during Meta OAuth: {exc}")
+
     return HTMLResponse(
         content=f"""
         <html><body style="font-family:sans-serif;padding:2rem;max-width:720px">
@@ -277,9 +360,12 @@ async def meta_auth_callback(
           <ol>
             <li>Open <code>backend/.env</code></li>
             <li>Replace <code>FACEBOOK_PAGE_ACCESS_TOKEN=...</code> with the token above</li>
+            <li>Confirm <code>FACEBOOK_PAGE_ID={settings.FACEBOOK_PAGE_ID or '(set your Page ID)'}</code></li>
+            <li>Set <code>DRAFT_MODE=False</code> for live posting</li>
             <li>Restart the backend server</li>
-            <li>Facebook and Instagram analytics should work again</li>
           </ol>
+          {ig_block}
+          {pages_html}
           <p style="color:#666;font-size:0.9rem">
             Do <strong>not</strong> use tokens from Graph API Explorer for production — they
             expire in about 1–2 hours. Always use this <code>/api/v1/auth/meta</code> flow and
