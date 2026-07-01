@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 from typing import Literal, Optional
 
+from app.data.creation_languages import get_language
 from app.schemas.creation import CreationIntent
 
 _CATALOG_PATH = Path(__file__).parent.parent / "data" / "kafi_products.json"
@@ -194,11 +195,28 @@ def _output_format_block(intent: CreationIntent) -> str:
     )
 
 
+def _language_block(language_code: str) -> str:
+    lang = get_language(language_code)
+    return (
+        f"═══ RESPONSE LANGUAGE: {lang['label']} ({lang['code']}) ═══\n"
+        f"Write ALL assistant text in {lang['label']}.\n"
+        "- User messages may be in any language; still reply in "
+        f"{lang['label']} unless they explicitly ask for another language.\n"
+        "- Keep brand names (Essence, Kafi) and official catalog product names "
+        "accurate — use English catalog names when no established translation exists.\n"
+        "- Section headers like **Meta AI prompt:** and **Voice-over script:** stay "
+        "in English for tool compatibility; the content inside each block must be "
+        f"in {lang['label']}.\n"
+        "- For RTL languages (Arabic, Urdu, Persian), write naturally in that script.\n\n"
+    )
+
+
 def build_system_prompt(
     matched_product: Optional[dict] = None,
     media_type: Optional[Literal["image", "video"]] = None,
     intent: CreationIntent = CreationIntent.PROMPT,
     has_reference_image: bool = False,
+    language: str = "en",
 ) -> str:
     """
     Build the system prompt for the Content Creation chatbot.
@@ -221,6 +239,7 @@ def build_system_prompt(
     base = (
         "You are the Prompt Studio creative assistant for Kafi Commodities (Pvt) Ltd — "
         "the Pakistani export company behind the **Essence** brand.\n\n"
+        f"{_language_block(language)}"
         f"{reference_block}"
         f"{_intent_mode_block(intent)}"
         f"{media_focus}"

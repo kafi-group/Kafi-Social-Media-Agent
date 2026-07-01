@@ -22,6 +22,7 @@ from app.schemas.creation import (
     ChatRequest,
     ChatResponse,
     CreationIntent,
+    CreationLanguageInfo,
     CreationModelsResponse,
     ImageGenerateRequest,
     ImageGenerateResponse,
@@ -31,6 +32,7 @@ from app.schemas.creation import (
     VoiceGenerateResponse,
 )
 from app.services.image_generation import extract_image_prompt, generate_image
+from app.data.creation_languages import list_creation_languages
 from app.services.product_knowledge import (
     build_system_prompt,
     infer_prompt_media_type,
@@ -93,6 +95,7 @@ async def list_creation_models():
         creation_api_keys_loaded=len(get_creation_gemini_api_keys()),
         voice_ready=True,
         voice_moods=list_voice_moods(),
+        languages=[CreationLanguageInfo(**lang) for lang in list_creation_languages()],
     )
 
 
@@ -126,6 +129,7 @@ async def creation_chat(request: Request, body: ChatRequest):
             media_type=media_type,
             intent=body.intent,
             has_reference_image=has_reference_image,
+            language=body.language,
         )
 
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
@@ -242,7 +246,11 @@ async def creation_generate_voice(request: Request, body: VoiceGenerateRequest):
         )
 
     try:
-        result = await generate_voice_async(body.text, mood=mood)  # type: ignore[arg-type]
+        result = await generate_voice_async(
+            body.text,
+            mood=mood,  # type: ignore[arg-type]
+            language=body.language,
+        )
         return VoiceGenerateResponse(
             media_path=result["media_path"],
             media_url=_resolve_media_url(result["media_url"], request),

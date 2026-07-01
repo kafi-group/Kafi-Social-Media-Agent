@@ -374,6 +374,7 @@ export type CreationIntent = 'prompt' | 'create_image' | 'create_voice' | 'video
 export interface ChatRequest {
   model: string;
   intent?: CreationIntent;
+  language?: string;
   messages: ChatMessage[];
 }
 
@@ -412,6 +413,7 @@ export interface CreationModelsResponse {
   cloudflare_configured?: boolean;
   voice_ready?: boolean;
   voice_moods?: { id: string; label: string }[];
+  languages?: { code: string; label: string; speech_lang: string }[];
 }
 
 export interface ImageGenerateResponse {

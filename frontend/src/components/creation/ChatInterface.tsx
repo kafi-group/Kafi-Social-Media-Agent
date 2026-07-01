@@ -23,6 +23,13 @@ import {
   X,
 } from 'lucide-react';
 import { API_ENDPOINTS, API_CONFIG, apiFetch, fetchWithTimeout } from '@/lib/api-client';
+import {
+  FALLBACK_CREATION_LANGUAGES,
+  readStoredCreationLanguage,
+  speechLangForCode,
+  storeCreationLanguage,
+  type CreationLanguageOption,
+} from '@/lib/creation-languages';
 import { useSpeechToText } from '@/hooks/useSpeechToText';
 import type {
   ChatMessage,
@@ -224,6 +231,10 @@ export default function ChatInterface() {
   const [imageModelLabel, setImageModelLabel] = useState<string>('');
   const [voiceMoods, setVoiceMoods] = useState<{ id: string; label: string }[]>([]);
   const [voiceMood, setVoiceMood] = useState<string>('professional');
+  const [creationLanguage, setCreationLanguage] = useState<string>(() => readStoredCreationLanguage());
+  const [languageOptions, setLanguageOptions] = useState<CreationLanguageOption[]>(
+    FALLBACK_CREATION_LANGUAGES
+  );
   const [creationIntent, setCreationIntent] = useState<CreationIntent>('create_image');
 
   const activeMode =
@@ -240,6 +251,8 @@ export default function ChatInterface() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const speechLang = speechLangForCode(languageOptions, creationLanguage);
+
   const appendFinalTranscript = React.useCallback((text: string) => {
     setInput((prev) => {
       const base = prev.trimEnd();
@@ -255,7 +268,7 @@ export default function ChatInterface() {
     toggleListening,
     stopListening: stopSpeechListening,
   } = useSpeechToText({
-    lang: 'en-US',
+    lang: speechLang,
     onFinalTranscript: appendFinalTranscript,
     onError: (message) => toast.error(message),
   });
@@ -288,6 +301,9 @@ export default function ChatInterface() {
       setImageReady(ready);
       setImageModelLabel(imageModel);
       setVoiceMoods(data.voice_moods ?? []);
+      if (data.languages?.length) {
+        setLanguageOptions(data.languages);
+      }
       return { imageReady: ready, imageModel };
     } catch {
       return { imageReady: false, imageModel: '' };
@@ -354,6 +370,7 @@ export default function ChatInterface() {
         body: JSON.stringify({
           model: '',
           intent: creationIntent,
+          language: creationLanguage,
           messages: toApiMessages(nextMessages),
         }),
       });
@@ -461,7 +478,7 @@ export default function ChatInterface() {
       const res = await apiFetch(API_ENDPOINTS.CREATION_GENERATE_VOICE, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: scriptText, mood: voiceMood }),
+        body: JSON.stringify({ text: scriptText, mood: voiceMood, language: creationLanguage }),
         signal: AbortSignal.timeout(API_CONFIG.timeout),
       });
       if (!res.ok) {
@@ -554,6 +571,22 @@ export default function ChatInterface() {
         <span className="text-sm text-slate-600 bg-slate-100 rounded-lg px-3 py-1.5 shrink-0 dark:bg-slate-700 dark:text-slate-200">
           {modelLabel}
         </span>
+        <select
+          value={creationLanguage}
+          onChange={(e) => {
+            const next = e.target.value;
+            setCreationLanguage(next);
+            storeCreationLanguage(next);
+          }}
+          className="shrink-0 text-sm rounded-lg border border-brand-200 bg-white px-2 py-1.5 text-brand-800 dark:bg-slate-700 dark:border-slate-500 dark:text-slate-100"
+          title="Language for chat replies and voice-over"
+        >
+          {languageOptions.map((lang) => (
+            <option key={lang.code} value={lang.code}>
+              {lang.label}
+            </option>
+          ))}
+        </select>
         {imageModelLabel ? (
           <span className="text-xs text-slate-500 bg-slate-50 rounded-lg px-2 py-1 shrink-0 dark:bg-slate-700/60 dark:text-slate-300">
             Images: {imageModelLabel}
@@ -621,7 +654,8 @@ export default function ChatInterface() {
             <p className="text-sm max-w-md mb-4">
               Select a mode below — <strong>Create image</strong> generates visuals in-app,{' '}
               <strong>Create voice</strong> writes a script you can turn into audio, and{' '}
-              <strong>Write prompt</strong> gives copy-paste text for Meta AI or Flow.
+              <strong>Write prompt</strong> gives copy-paste text for Meta AI or Flow. Choose a{' '}
+              <strong>language</strong> in the toolbar for replies in English, Urdu, Arabic, and more.
             </p>
             {/* Quick-start suggestions */}
             <div className="flex flex-wrap justify-center gap-2 text-xs">

@@ -13,6 +13,7 @@ from typing import Literal
 
 import edge_tts
 
+from app.data.creation_languages import get_language
 from app.services.media import MediaService
 from app.utils.exceptions import ContentGenerationError
 from app.utils.logger import logger
@@ -84,11 +85,13 @@ def extract_voice_script(text: str) -> str:
     return cleaned
 
 
-async def _synthesize_to_bytes(text: str, mood: VoiceMood) -> bytes:
+async def _synthesize_to_bytes(text: str, mood: VoiceMood, language: str = "en") -> bytes:
     preset = MOOD_PRESETS.get(mood, MOOD_PRESETS["professional"])
+    lang = get_language(language)
+    voice = lang["tts_voice"]
     communicate = edge_tts.Communicate(
         text=text,
-        voice=preset["voice"],
+        voice=voice,
         rate=preset["rate"],
         pitch=preset["pitch"],
     )
@@ -107,16 +110,23 @@ async def _synthesize_to_bytes(text: str, mood: VoiceMood) -> bytes:
             tmp_path.unlink(missing_ok=True)
 
 
-async def generate_voice_async(text: str, mood: VoiceMood = "professional") -> dict:
+async def generate_voice_async(
+    text: str,
+    mood: VoiceMood = "professional",
+    language: str = "en",
+) -> dict:
     """Generate MP3 voice-over and store via MediaService."""
     script = extract_voice_script(text)
     if len(script.strip()) < 3:
         raise ContentGenerationError("Script is too short for voice generation.")
 
-    logger.info(f"Generating voice-over (mood={mood}, chars={len(script)})")
+    lang = get_language(language)
+    logger.info(
+        f"Generating voice-over (mood={mood}, language={lang['code']}, chars={len(script)})"
+    )
 
     try:
-        audio_bytes = await _synthesize_to_bytes(script, mood)
+        audio_bytes = await _synthesize_to_bytes(script, mood, language=lang["code"])
     except Exception as exc:
         raise ContentGenerationError(
             f"Voice generation failed. If this repeats, wait a few seconds and retry. ({exc})"
@@ -131,11 +141,10 @@ async def generate_voice_async(text: str, mood: VoiceMood = "professional") -> d
         validate=False,
     )
 
-    preset = MOOD_PRESETS.get(mood, MOOD_PRESETS["professional"])
     return {
         "media_path": stored["media_path"],
         "media_url": stored["media_url"],
         "mood": mood,
-        "voice": preset["voice"],
+        "voice": lang["tts_voice"],
         "script_preview": script[:200] + ("…" if len(script) > 200 else ""),
     }

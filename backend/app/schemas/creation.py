@@ -5,7 +5,9 @@ Pydantic Schemas - Content Creation (chatbot + image generation)
 from enum import Enum as PyEnum
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.data.creation_languages import normalize_language_code
 
 
 class CreationIntent(str, PyEnum):
@@ -41,6 +43,14 @@ class ChatMessage(BaseModel):
     )
 
 
+class CreationLanguageInfo(BaseModel):
+    """A selectable output language for Prompt Studio."""
+
+    code: str
+    label: str
+    speech_lang: str
+
+
 class ChatRequest(BaseModel):
     """Request body for the chatbot."""
 
@@ -49,7 +59,16 @@ class ChatRequest(BaseModel):
         default=CreationIntent.PROMPT,
         description="User-selected mode: prompt, create_image, create_voice, or video_prompt.",
     )
+    language: str = Field(
+        default="en",
+        description="ISO-style language code for assistant replies (e.g. en, ur, de).",
+    )
     messages: list[ChatMessage] = Field(..., min_length=1)
+
+    @field_validator("language")
+    @classmethod
+    def validate_language(cls, value: str) -> str:
+        return normalize_language_code(value)
 
 
 class MatchedProduct(BaseModel):
@@ -101,6 +120,7 @@ class CreationModelsResponse(BaseModel):
     creation_api_keys_loaded: int = 0
     voice_ready: bool = True
     voice_moods: list[dict[str, str]] = Field(default_factory=list)
+    languages: list[CreationLanguageInfo] = Field(default_factory=list)
 
 
 class ImageGenerateRequest(BaseModel):
@@ -121,6 +141,15 @@ class VoiceGenerateRequest(BaseModel):
 
     text: str = Field(..., min_length=3, max_length=5000)
     mood: str = Field(default="professional", description="professional|calm|energetic|warm|promo")
+    language: str = Field(
+        default="en",
+        description="Language code for TTS voice selection (matches Prompt Studio language).",
+    )
+
+    @field_validator("language")
+    @classmethod
+    def validate_language(cls, value: str) -> str:
+        return normalize_language_code(value)
 
 
 class VoiceGenerateResponse(BaseModel):

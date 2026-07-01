@@ -396,7 +396,8 @@ class SocialAnalyticsService:
             )
 
         graph_url = self._meta_graph_url()
-        start, end = self._range_dates(days)
+        instagram_days = self._instagram_insights_days(days)
+        start, end = self._range_dates(instagram_days)
         insights_response = requests.get(
             f"{graph_url}/{account_id}/insights",
             params={
@@ -461,11 +462,13 @@ class SocialAnalyticsService:
 
         return self._response(
             platform="instagram",
-            days=days,
+            days=instagram_days,
             status="ok",
             totals=totals,
             series=series,
-            message="Instagram account analytics fetched successfully.",
+            message=self._instagram_insights_message(
+                instagram_days, days, "Instagram account analytics fetched successfully."
+            ),
         )
 
     def _youtube_analytics(self, days: int) -> dict:
@@ -657,6 +660,22 @@ class SocialAnalyticsService:
         end = date.today()
         start = end - timedelta(days=safe_days - 1)
         return start, end
+
+    # Instagram Graph /insights: since and until cannot span more than 30 days.
+    INSTAGRAM_INSIGHTS_MAX_DAYS = 30
+
+    def _instagram_insights_days(self, days: int) -> int:
+        return max(1, min(days, self.INSTAGRAM_INSIGHTS_MAX_DAYS))
+
+    def _instagram_insights_message(
+        self, instagram_days: int, requested_days: int, success_message: str
+    ) -> str:
+        if requested_days > instagram_days:
+            return (
+                f"{success_message} Instagram limits insights to the last "
+                f"{self.INSTAGRAM_INSIGHTS_MAX_DAYS} days; showing {instagram_days} days."
+            )
+        return success_message
 
     def _range_ms(self, days: int) -> tuple[int, int]:
         start, end = self._range_dates(days)
