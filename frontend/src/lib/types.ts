@@ -157,7 +157,7 @@ export interface AnalyticsOverview {
   qa_pass_rate: number;
 }
 
-export type AnalyticsPlatform = 'facebook' | 'instagram' | 'youtube';
+export type AnalyticsPlatform = 'facebook' | 'instagram' | 'youtube' | 'tiktok';
 
 export type AnalyticsStatus = 'ok' | 'not_configured' | 'permission_error' | 'api_error';
 

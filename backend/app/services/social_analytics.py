@@ -1,7 +1,7 @@
 """
 Social media analytics service.
 
-Fetches account-level analytics from Facebook, Instagram, and YouTube
+Fetches account-level analytics from Facebook, Instagram, YouTube, and TikTok
 and normalizes them into one response shape for the dashboard.
 """
 
@@ -29,7 +29,7 @@ class SocialAnalyticsService:
 
     def get_summary(self, days: int = 30) -> dict:
         """Fetch analytics for all platforms."""
-        platforms = ["facebook", "instagram", "youtube"]
+        platforms = ["facebook", "instagram", "youtube", "tiktok"]
         with ThreadPoolExecutor(max_workers=len(platforms)) as pool:
             results = list(pool.map(lambda p: self.get_platform(p, days), platforms))
 
@@ -66,6 +66,7 @@ class SocialAnalyticsService:
             "facebook": self._facebook_analytics,
             "instagram": self._instagram_analytics,
             "youtube": self._youtube_analytics,
+            "tiktok": self._tiktok_analytics,
         }
 
         if platform not in fetchers:
@@ -441,6 +442,18 @@ class SocialAnalyticsService:
             totals=totals,
             series=series,
             message="YouTube channel analytics fetched successfully.",
+        )
+
+    def _tiktok_analytics(self, days: int) -> dict:
+        """Placeholder until TikTok API credentials are configured."""
+        return self._response(
+            platform="tiktok",
+            days=days,
+            status="not_configured",
+            message=(
+                "TikTok analytics is not connected yet. "
+                "TikTok API credentials will be added in a future update."
+            ),
         )
 
     def _youtube_access_token(self) -> tuple[Optional[str], str]:

@@ -35,6 +35,7 @@ const platforms: Array<{
   { id: 'facebook', label: 'Facebook', accent: 'bg-blue-500' },
   { id: 'instagram', label: 'Instagram', accent: 'bg-pink-500' },
   { id: 'youtube', label: 'YouTube', accent: 'bg-red-600' },
+  { id: 'tiktok', label: 'TikTok', accent: 'bg-gray-900' },
 ];
 
 const ranges = [
