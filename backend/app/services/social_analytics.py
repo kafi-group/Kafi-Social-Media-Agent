@@ -1,7 +1,7 @@
 """
 Social media analytics service.
 
-Fetches account-level analytics from LinkedIn, Facebook, Instagram, and YouTube
+Fetches account-level analytics from Facebook, Instagram, and YouTube
 and normalizes them into one response shape for the dashboard.
 """
 
@@ -23,15 +23,13 @@ PlatformStatus = str
 class SocialAnalyticsService:
     """Account-level analytics client for all supported social platforms."""
 
-    # LinkedIn: REST API for org stats (requires rw_organization_admin — see /api/v1/auth/linkedin)
-    LINKEDIN_REST_URL = "https://api.linkedin.com/rest"
     YOUTUBE_TOKEN_URL = "https://oauth2.googleapis.com/token"
     YOUTUBE_ANALYTICS_URL = "https://youtubeanalytics.googleapis.com/v2/reports"
     REQUEST_TIMEOUT = 10  # seconds — keep dashboard loads snappy
 
     def get_summary(self, days: int = 30) -> dict:
         """Fetch analytics for all platforms."""
-        platforms = ["linkedin", "facebook", "instagram", "youtube"]
+        platforms = ["facebook", "instagram", "youtube"]
         with ThreadPoolExecutor(max_workers=len(platforms)) as pool:
             results = list(pool.map(lambda p: self.get_platform(p, days), platforms))
 
@@ -65,7 +63,6 @@ class SocialAnalyticsService:
         """Fetch analytics for a single platform."""
         platform = platform.lower()
         fetchers = {
-            "linkedin": self._linkedin_analytics,
             "facebook": self._facebook_analytics,
             "instagram": self._instagram_analytics,
             "youtube": self._youtube_analytics,
@@ -97,148 +94,6 @@ class SocialAnalyticsService:
                 status="api_error",
                 message=f"{platform.title()} analytics failed: {str(exc)}",
             )
-
-    def _linkedin_analytics(self, days: int) -> dict:
-        from app.services.linkedin_oauth import (
-            LINKEDIN_REST_URL,
-            linkedin_rest_headers,
-            organization_urn,
-            resolve_analytics_token,
-            token_has_org_analytics_scope,
-            token_scope_set,
-        )
-
-        organization_id = settings.LINKEDIN_ORGANIZATION_ID.strip()
-        access_token, token_source = resolve_analytics_token()
-
-        if not organization_id:
-            return self._response(
-                platform="linkedin",
-                days=days,
-                status="not_configured",
-                message=(
-                    "LinkedIn organization analytics needs LINKEDIN_ORGANIZATION_ID. "
-                    "Run: python scripts/lookup_linkedin_organizations.py"
-                ),
-            )
-
-        if not access_token:
-            return self._response(
-                platform="linkedin",
-                days=days,
-                status="not_configured",
-                message=(
-                    "LinkedIn organization analytics needs a token with rw_organization_admin. "
-                    "Visit http://localhost:8000/api/v1/auth/linkedin to authorize."
-                ),
-            )
-
-        if not token_has_org_analytics_scope(access_token):
-            scopes = ", ".join(sorted(token_scope_set(access_token))) or "(none)"
-            return self._response(
-                platform="linkedin",
-                days=days,
-                status="permission_error",
-                message=(
-                    f"Token from {token_source} lacks organization analytics scope "
-                    f"(needs rw_organization_admin). Current scopes: {scopes}. "
-                    "Enable Marketing Developer Platform on your LinkedIn app, then visit "
-                    "/api/v1/auth/linkedin and save the token as "
-                    "LINKEDIN_ORGANIZATION_ACCESS_TOKEN."
-                ),
-            )
-
-        organization_urn_value = organization_urn(organization_id)
-        start_ms, end_ms = self._range_ms(days)
-
-        headers = linkedin_rest_headers(access_token)
-
-        response = requests.get(
-            f"{LINKEDIN_REST_URL}/organizationalEntityShareStatistics",
-            headers=headers,
-            params={
-                "q": "organizationalEntity",
-                "organizationalEntity": organization_urn_value,
-                "timeIntervals.timeGranularityType": "DAY",
-                "timeIntervals.timeRange.start": start_ms,
-                "timeIntervals.timeRange.end": end_ms,
-            },
-            timeout=self.REQUEST_TIMEOUT,
-        )
-
-        if not response.ok:
-            status_code = response.status_code
-            try:
-                err_body = response.json()
-            except Exception:
-                err_body = {}
-
-            message_text = err_body.get("message", response.text[:300])
-
-            if status_code in (401, 403):
-                return self._response(
-                    platform="linkedin",
-                    days=days,
-                    status="permission_error",
-                    message=(
-                        f"LinkedIn access denied: {message_text} "
-                        "Re-authorize at /api/v1/auth/linkedin with a company page "
-                        "Administrator account and set LINKEDIN_ORGANIZATION_ACCESS_TOKEN."
-                    ),
-                )
-
-            return self._response(
-                platform="linkedin",
-                days=days,
-                status="api_error",
-                message=f"LinkedIn analytics API returned {status_code}: {response.text[:400]}",
-            )
-
-        totals = {
-            "impressions": 0,
-            "reach": 0,
-            "engagements": 0,
-            "likes": 0,
-            "comments": 0,
-            "shares": 0,
-            "clicks": 0,
-        }
-        series = []
-        for element in response.json().get("elements", []):
-            stats = element.get("totalShareStatistics", {})
-            impressions = self._number(stats.get("impressionCount"))
-            clicks = self._number(stats.get("clickCount"))
-            likes = self._number(stats.get("likeCount"))
-            comments = self._number(stats.get("commentCount"))
-            shares = self._number(stats.get("shareCount"))
-            unique_impressions = self._number(stats.get("uniqueImpressionsCount"))
-            engagements = clicks + likes + comments + shares
-
-            totals["impressions"] += impressions
-            totals["reach"] += unique_impressions
-            totals["engagements"] += engagements
-            totals["likes"] += likes
-            totals["comments"] += comments
-            totals["shares"] += shares
-            totals["clicks"] += clicks
-
-            start = element.get("timeRange", {}).get("start")
-            series.append(
-                {
-                    "date": self._date_from_ms(start),
-                    "views": impressions,
-                    "engagements": engagements,
-                }
-            )
-
-        return self._response(
-            platform="linkedin",
-            days=days,
-            status="ok",
-            totals=totals,
-            series=series,
-            message="LinkedIn organization analytics fetched successfully.",
-        )
 
     def _facebook_analytics(self, days: int) -> dict:
         page_id = settings.FACEBOOK_PAGE_ID.strip()
@@ -488,16 +343,35 @@ class SocialAnalyticsService:
                 ),
             )
 
-        access_token = self._youtube_access_token()
+        access_token, refresh_error = self._youtube_access_token()
         if not access_token:
+            if refresh_error == "expired_or_revoked":
+                message = (
+                    "YouTube refresh token expired or was revoked. "
+                    "Visit http://localhost:8000/api/v1/auth/youtube to reconnect, "
+                    "copy the new YOUTUBE_REFRESH_TOKEN into backend/.env, "
+                    "then restart the backend."
+                )
+                status = "token_expired"
+            elif refresh_error == "invalid_credentials":
+                message = (
+                    "YouTube client credentials do not match the refresh token. "
+                    "Confirm YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET match "
+                    "the Google Cloud project that issued YOUTUBE_REFRESH_TOKEN."
+                )
+                status = "permission_error"
+            else:
+                message = (
+                    "Could not refresh YouTube token. Reconnect at "
+                    "http://localhost:8000/api/v1/auth/youtube and ensure "
+                    "yt-analytics.readonly is granted."
+                )
+                status = "permission_error"
             return self._response(
                 platform="youtube",
                 days=days,
-                status="permission_error",
-                message=(
-                    "Could not refresh YouTube token. Reconnect YouTube with "
-                    "yt-analytics.readonly scope."
-                ),
+                status=status,
+                message=message,
             )
 
         start, end = self._range_dates(days)
@@ -569,14 +443,15 @@ class SocialAnalyticsService:
             message="YouTube channel analytics fetched successfully.",
         )
 
-    def _youtube_access_token(self) -> Optional[str]:
+    def _youtube_access_token(self) -> tuple[Optional[str], str]:
+        """Refresh YouTube access token. Returns (token, error_code)."""
         response = requests.post(
             self.YOUTUBE_TOKEN_URL,
             data={
                 "grant_type": "refresh_token",
-                "client_id": settings.YOUTUBE_CLIENT_ID,
-                "client_secret": settings.YOUTUBE_CLIENT_SECRET,
-                "refresh_token": settings.YOUTUBE_REFRESH_TOKEN,
+                "client_id": settings.YOUTUBE_CLIENT_ID.strip(),
+                "client_secret": settings.YOUTUBE_CLIENT_SECRET.strip(),
+                "refresh_token": settings.YOUTUBE_REFRESH_TOKEN.strip(),
             },
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             timeout=self.REQUEST_TIMEOUT,
@@ -587,9 +462,18 @@ class SocialAnalyticsService:
                 f"YouTube analytics token refresh failed: {response.status_code} "
                 f"{response.text[:500]}"
             )
-            return None
+            try:
+                err = response.json()
+                error = err.get("error", "")
+                if error == "invalid_grant":
+                    return None, "expired_or_revoked"
+                if error in ("invalid_client", "unauthorized_client"):
+                    return None, "invalid_credentials"
+            except Exception:
+                pass
+            return None, "refresh_failed"
 
-        return response.json().get("access_token")
+        return response.json().get("access_token"), ""
 
     def _meta_token_expired_error(self, response: requests.Response) -> bool:
         """Return True when Meta returns a token-expired OAuthException (code 190)."""
@@ -677,12 +561,6 @@ class SocialAnalyticsService:
             )
         return success_message
 
-    def _range_ms(self, days: int) -> tuple[int, int]:
-        start, end = self._range_dates(days)
-        start_dt = datetime.combine(start, datetime.min.time())
-        end_dt = datetime.combine(end + timedelta(days=1), datetime.min.time())
-        return int(start_dt.timestamp() * 1000), int(end_dt.timestamp() * 1000)
-
     def _meta_graph_url(self) -> str:
         version = settings.META_GRAPH_API_VERSION.strip() or "v18.0"
         return f"https://graph.facebook.com/{version}"
@@ -720,14 +598,6 @@ class SocialAnalyticsService:
                     self._number(value.get("value")) for value in values
                 )
         return totals
-
-    def _date_from_ms(self, value: Any) -> str:
-        if not value:
-            return ""
-        try:
-            return datetime.utcfromtimestamp(int(value) / 1000).date().isoformat()
-        except Exception:
-            return ""
 
     def _number(self, value: Any) -> int:
         if value is None:

@@ -234,8 +234,7 @@ async def linkedin_auth_callback(
           <ol>
             <li>Paste the token into <code>backend/.env</code></li>
             <li>Restart the backend</li>
-            <li>Open Dashboard → Analytics → LinkedIn</li>
-            <li>Or verify at <a href="/api/v1/auth/linkedin/status">/api/v1/auth/linkedin/status</a></li>
+            <li>Verify at <a href="/api/v1/auth/linkedin/status">/api/v1/auth/linkedin/status</a></li>
           </ol>
           <p style="color:#666;font-size:0.9rem">
             LinkedIn access tokens expire (~60 days). Re-run this flow when analytics stops working.

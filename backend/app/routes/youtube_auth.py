@@ -20,6 +20,32 @@ GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 REQUIRED_UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
+REQUIRED_ANALYTICS_SCOPE = "https://www.googleapis.com/auth/yt-analytics.readonly"
+
+
+def _probe_youtube_analytics(access_token: str) -> tuple[bool, str]:
+    """Return whether yt-analytics.readonly works for this access token."""
+    from datetime import date, timedelta
+
+    start = (date.today() - timedelta(days=7)).isoformat()
+    end = date.today().isoformat()
+    try:
+        response = requests.get(
+            "https://youtubeanalytics.googleapis.com/v2/reports",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={
+                "ids": "channel==MINE",
+                "startDate": start,
+                "endDate": end,
+                "metrics": "views",
+            },
+            timeout=20,
+        )
+        if response.ok:
+            return True, "YouTube Analytics API probe succeeded."
+        return False, f"Analytics probe failed ({response.status_code}): {response.text[:200]}"
+    except requests.RequestException as exc:
+        return False, f"Analytics probe error: {exc}"
 
 
 def _list_oauth_channels(access_token: str) -> list[dict]:
@@ -99,11 +125,14 @@ async def youtube_auth_status():
     upload_target = channels[0] if channels else None
     oauth_id = (upload_target or {}).get("id", "")
     id_matches = bool(configured_id and oauth_id and configured_id == oauth_id)
+    analytics_ok, analytics_message = _probe_youtube_analytics(token)
 
     return {
         "configured": True,
         "redirect_uri": redirect_uri,
         "oauth_valid": True,
+        "analytics_ok": analytics_ok,
+        "analytics_message": analytics_message,
         "upload_target": upload_target,
         "all_channels_visible_to_token": channels,
         "configured_channel_id": configured_id or None,
@@ -229,17 +258,40 @@ async def youtube_auth_callback(code: str = Query(default="")):
             """,
         )
 
-    upload_ok = REQUIRED_UPLOAD_SCOPE in granted_scopes.split()
-    scope_status = (
-        "Upload scope granted — you can post videos."
-        if upload_ok
-        else "WARNING: youtube.upload scope missing. Re-authorize after revoking app access."
-    )
+    granted_scope_list = granted_scopes.split()
+    upload_ok = REQUIRED_UPLOAD_SCOPE in granted_scope_list
+    analytics_ok = REQUIRED_ANALYTICS_SCOPE in granted_scope_list
+    scope_status_parts = []
+    if upload_ok:
+        scope_status_parts.append("Upload scope granted — you can post videos.")
+    else:
+        scope_status_parts.append(
+            "WARNING: youtube.upload scope missing. Re-authorize after revoking app access."
+        )
+    if analytics_ok:
+        scope_status_parts.append("Analytics scope granted — dashboard YouTube stats will work.")
+    else:
+        scope_status_parts.append(
+            "WARNING: yt-analytics.readonly scope missing. Dashboard analytics will fail."
+        )
+    scope_status = " ".join(scope_status_parts)
 
     channel_block = ""
     wrong_channel_warning = ""
+    analytics_probe_block = ""
     access_token = data.get("access_token", "")
     if access_token:
+        probe_ok, probe_message = _probe_youtube_analytics(access_token)
+        probe_style = (
+            "background:#ecfdf5;border:1px solid #6ee7b7"
+            if probe_ok
+            else "background:#fef2f2;border:1px solid #fca5a5"
+        )
+        analytics_probe_block = f"""
+          <div style="{probe_style};padding:1rem;margin:1rem 0;border-radius:6px">
+            <p><strong>Analytics API check:</strong> {probe_message}</p>
+          </div>
+        """
         channels = _list_oauth_channels(access_token)
         if channels:
             upload_target = channels[0]
@@ -283,6 +335,7 @@ async def youtube_auth_callback(code: str = Query(default="")):
         <html><body style="font-family:sans-serif;padding:2rem;max-width:720px">
           <h2>YouTube authorization successful</h2>
           {wrong_channel_warning}
+          {analytics_probe_block}
           <p><strong>{scope_status}</strong></p>
           <p>Callback / redirect URI for this token:</p>
           <pre style="background:#f4f4f4;padding:1rem;overflow:auto">{settings.YOUTUBE_REDIRECT_URI}</pre>

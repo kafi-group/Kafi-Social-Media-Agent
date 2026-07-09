@@ -32,7 +32,6 @@ const platforms: Array<{
   label: string;
   accent: string;
 }> = [
-  { id: 'linkedin', label: 'LinkedIn', accent: 'bg-blue-600' },
   { id: 'facebook', label: 'Facebook', accent: 'bg-blue-500' },
   { id: 'instagram', label: 'Instagram', accent: 'bg-pink-500' },
   { id: 'youtube', label: 'YouTube', accent: 'bg-red-600' },
@@ -76,7 +75,7 @@ const statusLabel = (status: PlatformAnalyticsResponse['status']) => {
 
 export default function AnalyticsPage() {
   const [range, setRange] = useState('30d');
-  const [activePlatform, setActivePlatform] = useState<AnalyticsPlatform>('linkedin');
+  const [activePlatform, setActivePlatform] = useState<AnalyticsPlatform>('facebook');
   const [summary, setSummary] = useState<AnalyticsSummaryResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
