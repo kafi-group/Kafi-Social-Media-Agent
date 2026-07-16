@@ -185,5 +185,6 @@ def generate_modelslab_image(prompt: str) -> dict:
         "media_path": stored["media_path"],
         "media_url": stored["media_url"],
         "model": f"modelslab/{model_id}",
+        "provider": "modelslab",
         "caption": caption,
     }

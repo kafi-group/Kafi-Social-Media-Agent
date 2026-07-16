@@ -107,14 +107,22 @@ class Settings(BaseSettings):
     # Optional full model chain (comma-separated). When empty, primary + fallback above are used.
     CREATION_GEMINI_MODELS: str = ""
 
-    # Content Creation — image generation (Cloudflare Workers AI by default)
-    # IMAGE_PROVIDER: cloudflare (recommended) | modelslab | gemini
-    IMAGE_PROVIDER: Literal["gemini", "modelslab", "cloudflare"] = "cloudflare"
-    # Gemini — separate Google account / API key recommended
-    IMAGE_GEMINI_API_KEY: str = ""
+    # Content Creation — image generation (Gemini by default for clearer visuals)
+    # IMAGE_PROVIDER: gemini (recommended) | modelslab | cloudflare
+    # Previous default (kept for optional rollback):
+    # IMAGE_PROVIDER=cloudflare  # Cloudflare Workers AI flux-1-schnell
+    IMAGE_PROVIDER: Literal["gemini", "modelslab", "cloudflare"] = "gemini"
+    # Dedicated Gemini key for Prompt Studio image generation only (not chat/posting).
+    STUDIO_IMAGE_GEMINI_API_KEY: str = ""
+    # Primary image model (tried first), then up to 3 fallbacks in IMAGE_GEMINI_FALLBACK_MODELS.
     IMAGE_GEMINI_MODEL: str = "gemini-2.5-flash-image"
-    IMAGE_GEMINI_FALLBACK_MODEL: str = "gemini-3.1-flash-image-preview"
+    # Comma-separated fallback models (max 3). Tried in order when primary fails.
+    IMAGE_GEMINI_FALLBACK_MODELS: str = (
+        "gemini-3.1-flash-image,gemini-3-pro-image-preview,gemini-2.5-flash-image"
+    )
     IMAGE_GEMINI_TIMEOUT: int = 180
+    # Prefer Gemini for the first N successful images each day, then use Cloudflare.
+    IMAGE_GEMINI_PRIORITY_COUNT: int = 5
     # ModelsLab — https://modelslab.com (free tier ~100 calls/day, no card)
     MODELSLAB_API_KEY: str = ""
     MODELSLAB_IMAGE_MODEL: str = "hidream-o1"
@@ -128,7 +136,8 @@ class Settings(BaseSettings):
     )
     MODELSLAB_IMAGE_TIMEOUT: int = 180
 
-    # Cloudflare Workers AI — https://developers.cloudflare.com/workers-ai/
+    # Cloudflare Workers AI — optional fallback (flux-1-schnell is fast but less detailed)
+    # To use again: set IMAGE_PROVIDER=cloudflare and fill the vars below.
     CLOUDFLARE_ACCOUNT_ID: str = ""
     CLOUDFLARE_API_TOKEN: str = ""
     CLOUDFLARE_IMAGE_MODEL: str = "@cf/black-forest-labs/flux-1-schnell"
@@ -345,18 +354,61 @@ def get_creation_gemini_models() -> list[str]:
     return ordered
 
 
+def get_image_gemini_api_keys() -> list[str]:
+    """
+    Gemini API keys for image generation, in failover order.
+
+    STUDIO_IMAGE_GEMINI_API_KEY is tried first, then creation/chat keys so a dead
+    dedicated image key does not block a working CREATION_GEMINI_API_KEY.
+    """
+    keys: list[str] = []
+    for candidate in (
+        settings.STUDIO_IMAGE_GEMINI_API_KEY,
+        *get_creation_gemini_api_keys(),
+        settings.GEMINI_API_KEY,
+    ):
+        key = (candidate or "").strip()
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+
 def get_image_gemini_api_key() -> str:
-    """API key for Gemini image generation only (when IMAGE_PROVIDER=gemini)."""
-    return settings.IMAGE_GEMINI_API_KEY.strip()
+    """
+    API key for Gemini image generation (IMAGE_PROVIDER=gemini).
+
+    Prefer STUDIO_IMAGE_GEMINI_API_KEY; fall back to creation/chat keys so one Gemini
+    key can power both Prompt Studio chat and image generation.
+    """
+    keys = get_image_gemini_api_keys()
+    return keys[0] if keys else ""
+
+
+_MAX_IMAGE_GEMINI_FALLBACK_MODELS = 3
 
 
 def get_image_gemini_models() -> list[str]:
-    """Gemini image models, in failover order."""
+    """
+    Gemini image models in failover order.
+
+    IMAGE_GEMINI_MODEL is tried first, then up to 3 entries from
+    IMAGE_GEMINI_FALLBACK_MODELS (comma-separated).
+    """
     ordered: list[str] = []
-    for model in (settings.IMAGE_GEMINI_MODEL, settings.IMAGE_GEMINI_FALLBACK_MODEL):
-        name = model.strip()
-        if name and name not in ordered:
-            ordered.append(name)
+    primary = (settings.IMAGE_GEMINI_MODEL or "").strip()
+    if primary:
+        ordered.append(primary)
+
+    fallback_raw = (settings.IMAGE_GEMINI_FALLBACK_MODELS or "").strip()
+    fallback_count = 0
+    if fallback_raw:
+        for part in fallback_raw.split(","):
+            if fallback_count >= _MAX_IMAGE_GEMINI_FALLBACK_MODELS:
+                break
+            name = part.strip()
+            if name and name not in ordered:
+                ordered.append(name)
+                fallback_count += 1
     return ordered
 
 
@@ -376,12 +428,12 @@ def _gemini_image_ready() -> bool:
 
 def resolve_image_provider() -> str:
     """
-    Image provider from IMAGE_PROVIDER only — no silent fallback to Gemini/ModelsLab.
+    Image provider from IMAGE_PROVIDER only — no silent provider switching.
 
-    When IMAGE_PROVIDER=cloudflare, images never use Gemini even if CREATION_GEMINI_API_KEY
-    is set (avoids confusing quota errors on Railway).
+    Default is gemini. To roll back to Cloudflare flux-1-schnell, set
+    IMAGE_PROVIDER=cloudflare (and keep CLOUDFLARE_* credentials).
     """
-    return (settings.IMAGE_PROVIDER or "cloudflare").strip().lower()
+    return (settings.IMAGE_PROVIDER or "gemini").strip().lower()
 
 
 def is_image_generation_ready() -> bool:
@@ -403,6 +455,7 @@ def get_image_generation_model_label() -> str:
         model = settings.MODELSLAB_IMAGE_MODEL.strip() or "hidream-o1"
         return f"ModelsLab {model}"
     if provider == "cloudflare":
+        # Optional fallback path: @cf/black-forest-labs/flux-1-schnell
         model = settings.CLOUDFLARE_IMAGE_MODEL.strip() or "@cf/black-forest-labs/flux-1-schnell"
         short = model.split("/")[-1] if "/" in model else model
         return f"Cloudflare {short}"

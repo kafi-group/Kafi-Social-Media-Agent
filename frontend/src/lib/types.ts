@@ -359,14 +359,23 @@ export interface RivalInsightsResponse {
 
 export type ChatRole = 'system' | 'user' | 'assistant';
 
+export interface ChatImageAttachment {
+  image_base64: string;
+  image_mime_type?: string | null;
+  /** Local preview URL (client-only, not sent to API). */
+  image_preview_url?: string | null;
+}
+
 export interface ChatMessage {
   role: ChatRole;
   content: string;
-  /** Base64 reference image for vision-based prompt writing (user messages). */
+  /** @deprecated Prefer `images` — kept for single-image backward compatibility. */
   image_base64?: string | null;
   image_mime_type?: string | null;
   /** Local preview URL (client-only, not sent to API). */
   image_preview_url?: string | null;
+  /** Up to 5 reference images for vision-based prompt writing. */
+  images?: ChatImageAttachment[] | null;
 }
 
 export type CreationIntent = 'prompt' | 'create_image' | 'create_voice' | 'video_prompt';
@@ -420,6 +429,10 @@ export interface ImageGenerateResponse {
   media_path: string;
   media_url: string;
   model: string;
+  /** gemini | cloudflare | modelslab */
+  provider?: string;
+  /** Present when Cloudflare was used because Gemini quota/budget was hit. */
+  fallback_reason?: string | null;
   caption?: string | null;
 }
 

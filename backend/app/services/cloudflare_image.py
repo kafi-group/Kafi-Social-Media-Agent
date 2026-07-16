@@ -1,5 +1,7 @@
 """
-Cloudflare Workers AI text-to-image for Prompt Studio.
+Cloudflare Workers AI text-to-image for Prompt Studio (optional fallback).
+
+Default image provider is Gemini. To use this again, set IMAGE_PROVIDER=cloudflare.
 
 Docs: https://developers.cloudflare.com/workers-ai/models/flux-1-schnell/
 """
@@ -104,5 +106,6 @@ def generate_cloudflare_image(prompt: str) -> dict:
         "media_path": stored["media_path"],
         "media_url": stored["media_url"],
         "model": model,
+        "provider": "cloudflare",
         "caption": None,
     }

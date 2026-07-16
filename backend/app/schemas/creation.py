@@ -27,12 +27,26 @@ class ChatRole(str, PyEnum):
     ASSISTANT = "assistant"
 
 
+class ChatImageAttachment(BaseModel):
+    """One reference image attached to a user chat message."""
+
+    image_base64: str = Field(
+        ...,
+        description="Base64 image bytes (no data-URL prefix). Max ~4MB decoded.",
+    )
+    image_mime_type: Optional[str] = Field(
+        default="image/jpeg",
+        description="e.g. image/jpeg, image/png, image/webp",
+    )
+
+
 class ChatMessage(BaseModel):
     """A single chat message."""
 
     role: ChatRole
     content: str
     # Optional reference image (user messages only) — sent to Gemini vision for prompt writing.
+    # Prefer `images` for multiple attachments; single fields kept for backward compatibility.
     image_base64: Optional[str] = Field(
         default=None,
         description="Base64 image bytes (no data-URL prefix). Max ~4MB decoded.",
@@ -40,6 +54,11 @@ class ChatMessage(BaseModel):
     image_mime_type: Optional[str] = Field(
         default=None,
         description="e.g. image/jpeg, image/png, image/webp",
+    )
+    images: Optional[list[ChatImageAttachment]] = Field(
+        default=None,
+        max_length=5,
+        description="Up to 5 reference images for vision-based prompt writing.",
     )
 
 
@@ -133,6 +152,14 @@ class ImageGenerateResponse(BaseModel):
     media_path: str
     media_url: str
     model: str
+    provider: str = Field(
+        default="",
+        description="Image backend used: gemini | cloudflare | modelslab",
+    )
+    fallback_reason: Optional[str] = Field(
+        default=None,
+        description="If Cloudflare was used as fallback, explains why.",
+    )
     caption: Optional[str] = None
 
 

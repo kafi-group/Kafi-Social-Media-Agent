@@ -1,83 +1,31 @@
 """
-Product Knowledge Service
-Loads the Kafi Commodities / Essence brand product catalog and provides:
-  - product_for_query()       – detect which product a user message is about
-  - infer_prompt_media_type()   – guess image vs video from the user's request
-  - build_system_prompt()       – system instruction for Prompt Studio chatbot
+Prompt Studio system prompts and helpers.
+
+Product catalog matching was removed — the chatbot follows the user's request
+directly instead of grounding replies in a prefed Essence SKU list.
 """
 
 from __future__ import annotations
 
-import json
-import re
-from pathlib import Path
 from typing import Literal, Optional
 
 from app.data.creation_languages import get_language
 from app.schemas.creation import CreationIntent
 
-_CATALOG_PATH = Path(__file__).parent.parent / "data" / "kafi_products.json"
 
-# ---------------------------------------------------------------------------
-# Load catalog once at import time
-# ---------------------------------------------------------------------------
-
-def _load_catalog() -> list[dict]:
-    try:
-        with open(_CATALOG_PATH, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return []
-
-
-CATALOG: list[dict] = _load_catalog()
-
-# Pre-build alias → product index for O(1) lookup
-_ALIAS_INDEX: dict[str, int] = {}
-for _idx, _product in enumerate(CATALOG):
-    for _alias in _product.get("aliases", []):
-        _ALIAS_INDEX[_alias.lower()] = _idx
-
-
-# ---------------------------------------------------------------------------
-# Public helpers
-# ---------------------------------------------------------------------------
-
-def product_for_query(user_message: str) -> Optional[dict]:
-    """
-    Return the best-matching product dict for the given user message, or None.
-
-    Strategy (fast and reliable):
-    1. Normalise the message to lowercase.
-    2. Check every alias in the index for substring presence.
-    3. Prefer the alias with the most words (most specific match wins).
-    """
-    text = user_message.lower()
-    # remove punctuation for cleaner matching
-    text = re.sub(r"[^\w\s]", " ", text)
-
-    best_idx: Optional[int] = None
-    best_length: int = 0
-
-    for alias, idx in _ALIAS_INDEX.items():
-        if alias in text:
-            if len(alias) > best_length:
-                best_length = len(alias)
-                best_idx = idx
-
-    if best_idx is not None:
-        return CATALOG[best_idx]
+def product_for_query(_user_message: str) -> Optional[dict]:
+    """Deprecated — catalog matching disabled. Always returns None."""
     return None
 
 
 def get_all_product_names() -> list[str]:
-    """Return a flat list of all product names for display purposes."""
-    return [p["name"] for p in CATALOG]
+    """Deprecated stub — catalog matching disabled."""
+    return []
 
 
 def get_categories() -> list[str]:
-    """Return a sorted unique list of product categories."""
-    return sorted({p.get("category", "Other") for p in CATALOG})
+    """Deprecated stub — catalog matching disabled."""
+    return []
 
 
 def infer_prompt_media_type(user_message: str) -> Optional[Literal["image", "video"]]:
@@ -98,32 +46,53 @@ def infer_prompt_media_type(user_message: str) -> Optional[Literal["image", "vid
     return None
 
 
-def _format_product_block(product: dict) -> str:
-    packaging_list = "\n".join(f"    • {p}" for p in product.get("packaging", []))
+def _follow_user_intent_block() -> str:
     return (
-        f"  Name       : {product['name']}\n"
-        f"  Brand      : {product.get('brand', 'Essence')}\n"
-        f"  Category   : {product.get('category', '')}\n"
-        f"  Description: {product.get('description', '')}\n"
-        f"  Packaging  :\n{packaging_list}"
+        "═══ FOLLOW THE USER'S REQUEST EXACTLY ═══\n"
+        "Read the user's message carefully. Generate ONLY what they asked for.\n\n"
+        "YOU MUST:\n"
+        "- Honor every explicit detail they give (subject, style, mood, colors, platform, "
+        "aspect ratio, tone, length, do's and don'ts).\n"
+        "- Prefer their wording and priorities over defaults.\n"
+        "- If they ask for one thing (e.g. a prompt, an image brief, a voice script), "
+        "deliver only that — do not add extras they did not request.\n"
+        "- If they attach images, treat those images as primary visual evidence and "
+        "combine them with their written instructions.\n\n"
+        "YOU MUST NEVER:\n"
+        "- Invent subjects, brands, products, props, or scenes the user did not ask for.\n"
+        "- Override their brief with a generic template or assumed product catalog.\n"
+        "- Ignore constraints like 'no text on image', 'keep background white', "
+        "'match this style', etc.\n"
+        "- Expand into a different creative direction unless they asked for options.\n\n"
     )
 
 
-def _reference_image_block() -> str:
+def _reference_image_block(image_count: int = 1) -> str:
+    count = max(1, min(int(image_count or 1), 5))
+    plural = "s" if count != 1 else ""
     return (
-        "═══ REFERENCE IMAGE ATTACHED (vision) ═══\n"
-        "The user attached a reference image. You CAN see it in their message.\n\n"
+        f"═══ REFERENCE IMAGE{plural.upper()} ATTACHED (vision) — {count} image{plural} ═══\n"
+        f"The user attached {count} reference image{plural}. You CAN see "
+        f"{'all of them' if count > 1 else 'it'} in their message.\n\n"
         "YOU MUST:\n"
-        "- Analyze the image: product/packaging, label text, colors, lighting, background, "
-        "composition, camera angle, props, and overall style.\n"
-        "- Write a **Meta AI prompt:** that recreates or adapts that visual for the Essence "
-        "product the user names (or ask ONE short question if the target product is unclear).\n"
-        "- Ground packaging facts in the catalog when a product is identified.\n"
-        "- Output the formatted prompt block only — you are writing a text prompt, NOT generating "
-        "a new image yourself.\n\n"
+        f"- Inspect EVERY attached image (all {count}). Do not skip any.\n"
+        "- For each image, note: subject, materials/textures, colors, lighting, background, "
+        "composition, camera angle, props, text/labels if visible, and overall style.\n"
+        "- When multiple images are attached:\n"
+        "  • Compare them and extract shared style cues (palette, lighting, mood, framing).\n"
+        "  • Call out useful differences (angles, variants, packaging details, close-ups).\n"
+        "  • Merge the strongest cues into ONE coherent response that reflects the full set.\n"
+        "- Obey the user's written instructions about how to use the images "
+        "(match style, recreate, combine elements, adapt to a new subject, etc.).\n"
+        "- Write a precise, high-quality **Meta AI prompt:** (or voice script in voice mode) "
+        "that clearly reflects BOTH the attached image evidence AND the user's text request.\n"
+        "- Output the formatted block only — you are writing a text prompt/script, NOT "
+        "claiming you already generated a final image yourself.\n\n"
         "YOU MUST NEVER:\n"
         "- Say you cannot see or analyze images.\n"
-        "- Ignore the reference image when the user asked you to match or adapt it.\n\n"
+        "- Analyze only the first image when more than one is attached.\n"
+        "- Ignore the reference image(s) when the user asked you to match or adapt them.\n"
+        "- Contradict details that are clearly visible across the attachments.\n\n"
     )
 
 
@@ -137,11 +106,13 @@ def _intent_mode_block(intent: CreationIntent) -> str:
             "directly to the image API.\n\n"
             "YOU MUST:\n"
             "- Output ONLY the **Meta AI prompt:** block (see OUTPUT FORMAT). No intro, no notes.\n"
-            "- Write one dense image-generation paragraph grounded in catalog packaging facts.\n\n"
+            "- Write one dense image-generation paragraph that matches the user's request "
+            "and any attached reference images.\n\n"
             "YOU MUST NEVER:\n"
             "- Include a **Voice-over script:** or any narration text.\n"
             "- Add chit-chat, apologies, or instructions to copy/paste elsewhere.\n"
-            "- Say you cannot generate images.\n\n"
+            "- Say you cannot generate images.\n"
+            "- Add creative extras the user did not ask for.\n\n"
         )
     if intent == CreationIntent.CREATE_VOICE:
         return (
@@ -150,16 +121,18 @@ def _intent_mode_block(intent: CreationIntent) -> str:
             "They click **Generate voice** separately to hear it — do NOT assume audio is automatic.\n\n"
             "YOU MUST:\n"
             "- Output ONLY the **Voice-over script:** block (2–5 sentences, speakable narration).\n"
-            "- Match tone, length, and product facts the user asked for.\n\n"
+            "- Match tone, length, and details the user asked for.\n\n"
             "YOU MUST NEVER:\n"
             "- Include a **Meta AI prompt:** or image/visual prompt block.\n"
-            "- Redirect to ElevenLabs or external TTS tools.\n\n"
+            "- Redirect to ElevenLabs or external TTS tools.\n"
+            "- Invent product claims or story points the user did not provide.\n\n"
         )
     return (
         "═══ USER SELECTED MODE: WRITE PROMPT ═══\n"
         "The user wants a copy-paste prompt for Meta AI, Google Flow, or similar tools.\n"
         "Output ONLY the formatted prompt block — no voice-over script, no in-app generation.\n"
-        "For video/reel requests set **Type:** Video and describe motion and pacing.\n\n"
+        "For video/reel requests set **Type:** Video and describe motion and pacing.\n"
+        "Stay faithful to the user's brief and any attached reference images.\n\n"
     )
 
 
@@ -184,14 +157,34 @@ def _output_format_block(intent: CreationIntent) -> str:
     return (
         "OUTPUT FORMAT:\n"
         "---\n"
-        "**Product:** [full catalog name]\n"
+        "**Subject:** [what the visual is about — from the user's request]\n"
         "**Type:** Image | Video\n"
         "**Use case:** [e.g. Instagram feed, Amazon listing, 15s reel]\n"
         "**Meta AI prompt:**\n"
         "[One dense paragraph — copy/paste ready. No bullet lists inside this block.]\n"
-        "**Notes:** [optional, one line max]\n"
+        "**Notes:** [optional, one line max — only if needed]\n"
         "---\n"
         "Do NOT include **Voice-over script:** in this mode.\n"
+    )
+
+
+def _conversation_memory_block() -> str:
+    return (
+        "═══ CONVERSATION MEMORY (this chat only) ═══\n"
+        "You receive the full message history for the current chat session.\n\n"
+        "YOU MUST:\n"
+        "- Remember product name, packaging, brand, style, colors, platform, and constraints "
+        "mentioned earlier in this chat.\n"
+        "- Treat follow-ups as continuing the same brief "
+        "(e.g. 'make it warmer', 'change to glass jar', 'now do a reel version').\n"
+        "- Reuse earlier reference-image conclusions when the user refers back to them, "
+        "even if image bytes are only on an earlier turn.\n"
+        "- Keep one coherent product/subject thread unless the user clearly switches topics.\n\n"
+        "YOU MUST NEVER:\n"
+        "- Forget the product or details already established in this chat.\n"
+        "- Ask the user to restate information they already gave unless it is truly ambiguous.\n"
+        "- Carry memory from a previous chat — each new chat starts fresh "
+        "(you only see the history included in this request).\n\n"
     )
 
 
@@ -202,8 +195,6 @@ def _language_block(language_code: str) -> str:
         f"Write ALL assistant text in {lang['label']}.\n"
         "- User messages may be in any language; still reply in "
         f"{lang['label']} unless they explicitly ask for another language.\n"
-        "- Keep brand names (Essence, Kafi) and official catalog product names "
-        "accurate — use English catalog names when no established translation exists.\n"
         "- Section headers like **Meta AI prompt:** and **Voice-over script:** stay "
         "in English for tool compatibility; the content inside each block must be "
         f"in {lang['label']}.\n"
@@ -217,16 +208,24 @@ def build_system_prompt(
     intent: CreationIntent = CreationIntent.PROMPT,
     has_reference_image: bool = False,
     language: str = "en",
+    reference_image_count: int = 0,
 ) -> str:
     """
     Build the system prompt for the Content Creation chatbot.
+
+    Catalog / prefed-product grounding is intentionally omitted — follow the user request.
+    `matched_product` is ignored (kept for call-site compatibility).
     """
-    reference_block = _reference_image_block() if has_reference_image else ""
+    _ = matched_product
+    image_count = max(0, min(int(reference_image_count or 0), 5))
+    if has_reference_image and image_count < 1:
+        image_count = 1
+    reference_block = _reference_image_block(image_count) if image_count else ""
 
     media_focus = ""
     if intent == CreationIntent.CREATE_IMAGE or media_type == "image":
         media_focus = (
-            "Focus: single still frame / packshot / marketing visual for in-app image generation.\n"
+            "Focus: single still frame / marketing visual for in-app image generation.\n"
         )
     elif media_type == "video":
         media_focus = (
@@ -234,54 +233,38 @@ def build_system_prompt(
             "for Meta AI or Google Flow.\n"
         )
     elif intent == CreationIntent.CREATE_VOICE:
-        media_focus = "Focus: spoken voice-over / narration script for product marketing.\n"
+        media_focus = "Focus: spoken voice-over / narration script.\n"
 
-    base = (
-        "You are the Prompt Studio creative assistant for Kafi Commodities (Pvt) Ltd — "
-        "the Pakistani export company behind the **Essence** brand.\n\n"
+    return (
+        "You are Prompt Studio — a careful creative assistant that writes strong image, "
+        "video, and voice-over prompts from the user's brief.\n\n"
+        f"{_follow_user_intent_block()}"
+        f"{_conversation_memory_block()}"
         f"{_language_block(language)}"
         f"{reference_block}"
         f"{_intent_mode_block(intent)}"
         f"{media_focus}"
-        "BRAND & VISUAL DIRECTION (Essence):\n"
-        "- Premium export-quality food packaging; clean, appetizing, trustworthy.\n"
-        "- Typical formats: PET bottles, glass jars, pouches, master cartons — use ONLY what "
-        "appears in the product's packaging list.\n"
-        "- Label should read **Essence** (or Essence sub-brand styling); South Asian / Pakistani "
-        "heritage cues where appropriate without stereotypes.\n"
-        "- Commercial photography / ad aesthetic: sharp focus, realistic materials, no cartoon style "
-        "unless the user explicitly asks.\n\n"
+        "CREATIVE DIRECTION:\n"
+        "- Follow the user's request closely: subject, style, mood, platform, and constraints.\n"
+        "- Prefer commercial photography / ad aesthetic only when it fits the brief: "
+        "sharp focus, realistic materials — no cartoon style unless the user asks.\n"
+        "- Do not invent a fixed product catalog or force a brand SKU list onto the user.\n"
+        "- If the brief is vague AND no reference images were attached AND earlier turns "
+        "also lack enough product detail, ask ONE short clarifying question OR draft a "
+        "solid prompt and clearly state assumptions.\n"
+        "- If reference images were attached (this turn or earlier in the chat), do not ask "
+        "unnecessary questions — use conversation memory + image evidence.\n\n"
         "PROMPT ENGINEERING RULES:\n"
-        "1. Ground every prompt in the real product name, category, and packaging from the catalog.\n"
-        "2. Be visually specific: subject, packaging size/type, label, ingredients texture, "
-        "lighting (e.g. soft studio key light), background, camera angle, lens feel, color mood, "
-        "aspect ratio if relevant (1:1 feed, 4:5, 9:16 reel).\n"
-        "3. For VIDEO prompts add: duration feel (e.g. 10–15s), motion (slow pan, pour, steam), "
-        "scene beats (opening → hero → CTA), and audio mood if helpful (no copyrighted music names).\n"
-        "4. Do NOT invent SKUs, weights, or pack types that are not in the catalog.\n"
-        "5. Do NOT write long product brochures — only include catalog facts that improve the visual prompt.\n"
-        "6. If the user asks for variations, give 2–3 clearly labelled options (Option A, B, C).\n"
-        "7. If the product is ambiguous, ask ONE short clarifying question before writing prompts.\n"
-        "8. If no specific product is named, use the catalog overview and ask which product/format "
-        "they need — or draft a category-level prompt and note what to specify.\n\n"
+        "1. Be visually specific: subject, materials, lighting, background, camera angle, "
+        "lens feel, color mood, aspect ratio if relevant (1:1 feed, 4:5, 9:16 reel).\n"
+        "2. For VIDEO prompts add: duration feel (e.g. 10–15s), motion, scene beats "
+        "(opening → hero → CTA), and audio mood if helpful (no copyrighted music names).\n"
+        "3. Do NOT write long brochures — only include details that improve the prompt.\n"
+        "4. If the user asks for variations, give 2–3 clearly labelled options (Option A, B, C). "
+        "If they did not ask for variations, give one best answer.\n"
+        "5. When images are attached, weave visible details from ALL images into the final "
+        "prompt so the response clearly reflects the full attachment set.\n"
+        "6. On follow-up messages, update the previous brief instead of starting from zero.\n\n"
         f"{_output_format_block(intent)}\n"
-        "Keep chatter outside the block minimal. Lead with the formatted block.\n\n"
+        "Keep chatter outside the block minimal. Lead with the formatted block.\n"
     )
-
-    if matched_product:
-        product_block = (
-            "TARGET PRODUCT (catalog ground truth — use accurately):\n"
-            f"{_format_product_block(matched_product)}\n\n"
-            "Reflect the correct packaging line (PET vs glass, size) from the list above."
-        )
-        return base + product_block
-
-    categories = get_categories()
-    cat_list = "\n".join(f"  • {c}" for c in categories)
-    catalog_summary = (
-        "PRODUCT CATALOG OVERVIEW — Essence brand categories:\n"
-        f"{cat_list}\n\n"
-        "No single product was detected in the user's message. Ask which product and packaging "
-        "format they need, or produce a category-level prompt and state assumptions clearly."
-    )
-    return base + catalog_summary

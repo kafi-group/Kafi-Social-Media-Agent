@@ -26,7 +26,6 @@ from app.schemas.creation import (
     CreationModelsResponse,
     ImageGenerateRequest,
     ImageGenerateResponse,
-    MatchedProduct,
     ModelInfo,
     VoiceGenerateRequest,
     VoiceGenerateResponse,
@@ -36,7 +35,6 @@ from app.data.creation_languages import list_creation_languages
 from app.services.product_knowledge import (
     build_system_prompt,
     infer_prompt_media_type,
-    product_for_query,
 )
 from app.services.voice_tts import MOOD_PRESETS, generate_voice_async, list_voice_moods
 from app.utils.exceptions import ContentGenerationError, LLMConnectionError
@@ -106,16 +104,21 @@ async def creation_chat(request: Request, body: ChatRequest):
     try:
         last_user_text = ""
         has_reference_image = False
-        for m in body.messages:
-            if m.role.value == "user":
-                if m.image_base64 and m.image_base64.strip():
-                    has_reference_image = True
+        reference_image_count = 0
         for m in reversed(body.messages):
-            if m.role.value == "user":
-                last_user_text = m.content
-                break
-
-        matched = product_for_query(last_user_text) if last_user_text else None
+            if m.role.value != "user":
+                continue
+            last_user_text = m.content
+            if m.images:
+                reference_image_count = sum(
+                    1
+                    for img in m.images[:5]
+                    if img.image_base64 and img.image_base64.strip()
+                )
+            elif m.image_base64 and m.image_base64.strip():
+                reference_image_count = 1
+            has_reference_image = reference_image_count > 0
+            break
 
         if body.intent == CreationIntent.CREATE_IMAGE:
             media_type = "image"
@@ -125,24 +128,59 @@ async def creation_chat(request: Request, body: ChatRequest):
             media_type = infer_prompt_media_type(last_user_text) if last_user_text else None
 
         system_prompt = build_system_prompt(
-            matched,
             media_type=media_type,
             intent=body.intent,
             has_reference_image=has_reference_image,
             language=body.language,
+            reference_image_count=reference_image_count,
         )
 
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
         for m in body.messages:
-            entry: dict = {"role": m.role.value, "content": m.content}
-            if m.image_base64 and m.image_base64.strip():
+            content = m.content
+            image_entries: list[dict] = []
+            if m.images:
+                for img in m.images[:5]:
+                    b64 = (img.image_base64 or "").strip()
+                    if not b64:
+                        continue
+                    if len(b64) > 5_500_000:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="One reference image is too large. Use images under 4 MB each.",
+                        )
+                    image_entries.append(
+                        {
+                            "image_base64": b64,
+                            "image_mime_type": (img.image_mime_type or "image/jpeg").strip(),
+                        }
+                    )
+            elif m.image_base64 and m.image_base64.strip():
                 if len(m.image_base64) > 5_500_000:
                     raise HTTPException(
                         status_code=400,
                         detail="Reference image is too large. Use an image under 4 MB.",
                     )
-                entry["image_base64"] = m.image_base64.strip()
-                entry["image_mime_type"] = (m.image_mime_type or "image/jpeg").strip()
+                image_entries.append(
+                    {
+                        "image_base64": m.image_base64.strip(),
+                        "image_mime_type": (m.image_mime_type or "image/jpeg").strip(),
+                    }
+                )
+
+            # Explicit multi-image cue so the model knows how many visuals to analyze.
+            if m.role.value == "user" and image_entries:
+                n = len(image_entries)
+                cue = (
+                    f"[User attached {n} reference image{'s' if n != 1 else ''}. "
+                    f"Analyze {'every image' if n > 1 else 'this image'} carefully, "
+                    "follow the user's written request exactly, and respond accordingly.]"
+                )
+                content = f"{cue}\n\n{content}".strip() if content.strip() else cue
+
+            entry: dict = {"role": m.role.value, "content": content}
+            if image_entries:
+                entry["images"] = image_entries
             messages.append(entry)
 
         reply, model = chat_client.chat(
@@ -151,21 +189,10 @@ async def creation_chat(request: Request, body: ChatRequest):
             models=get_creation_gemini_models(),
         )
 
-        matched_product_payload: MatchedProduct | None = None
-        if matched:
-            matched_product_payload = MatchedProduct(
-                id=matched["id"],
-                name=matched["name"],
-                brand=matched.get("brand", "Essence"),
-                category=matched.get("category", ""),
-                description=matched.get("description", ""),
-                packaging=matched.get("packaging", []),
-            )
-
         return ChatResponse(
             model=model,
             reply=reply,
-            matched_product=matched_product_payload,
+            matched_product=None,
             intent=body.intent,
         )
 
@@ -188,6 +215,8 @@ async def creation_generate_image(request: Request, body: ImageGenerateRequest):
             media_path=result["media_path"],
             media_url=_resolve_media_url(result["media_url"], request),
             model=result["model"],
+            provider=result.get("provider") or resolve_image_provider(),
+            fallback_reason=result.get("fallback_reason"),
             caption=result.get("caption"),
         )
     except ContentGenerationError as e:

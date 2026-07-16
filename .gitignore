@@ -21,6 +21,7 @@ build/
 backend/.env
 frontend/.env.local
 backend/.internal_api_key
+backend/.gemini_image_daily.json
 
 # IDE
 .vscode/

@@ -148,7 +148,7 @@ export function getAppSubtitle(tier?: AccessTier | null): string {
     return 'Junior — Creation & Posting';
   }
   if (mode === 'creation-only') {
-    return 'Essence product prompt studio for Meta AI visuals';
+    return 'Creative prompt studio for images, voice, and Meta AI visuals';
   }
   return 'Social Media Agent';
 }

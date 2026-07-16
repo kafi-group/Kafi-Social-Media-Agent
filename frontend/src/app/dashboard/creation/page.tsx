@@ -8,7 +8,7 @@ export default function CreationPage() {
       <div className="mb-8">
         <h1 className="text-4xl font-bold text-slate-900 mb-2 dark:text-slate-100">🎨 Prompt Studio</h1>
         <p className="text-gray-600 dark:text-slate-400">
-          Chat for Essence product prompts, then generate <strong>images</strong> (Cloudflare Workers AI) and{' '}
+          Chat for creative prompts, then generate <strong>images</strong> (Google Gemini) and{' '}
           <strong>voice-overs</strong> (free TTS) in-app. Use Meta AI and Google Flow for video.
         </p>
       </div>
@@ -18,7 +18,7 @@ export default function CreationPage() {
           <div className="text-2xl mb-1">💬</div>
           <h3 className="font-semibold text-sm text-slate-900 dark:text-slate-100">1. Describe the shot</h3>
           <p className="text-xs text-gray-500 dark:text-slate-400 mt-1">
-            Name the product, packaging, and use case (Instagram feed, Amazon listing, reel)
+            Describe the subject, style, mood, and use case (Instagram feed, Amazon listing, reel)
           </p>
         </div>
         <div className="bg-white rounded-lg shadow-sm p-4 border-l-4 border-gold-500 dark:bg-slate-800">
@@ -43,10 +43,18 @@ export default function CreationPage() {
         <h3 className="font-semibold text-brand-900 dark:text-brand-200 mb-2">💡 Tips</h3>
         <ul className="text-sm text-slate-700 dark:text-slate-300 space-y-1.5">
           <li>• Chat uses <code>CREATION_GEMINI_API_KEY</code> — separate from Content Posting</li>
-          <li>• Images use <code>IMAGE_PROVIDER=cloudflare</code> + Cloudflare API token (not Gemini)</li>
+          <li>
+            • Images use <code>IMAGE_PROVIDER=gemini</code> + <code>STUDIO_IMAGE_GEMINI_API_KEY</code>{' '}
+            (up to 3 fallback models; falls back to creation key if empty)
+          </li>
+          <li>
+            • Optional rollback: set <code>IMAGE_PROVIDER=cloudflare</code> for Workers AI
+            flux-1-schnell
+          </li>
           <li>• Voice-over is free (edge-tts) — choose mood in the toolbar before clicking Generate voice</li>
           <li>• Video: open <strong>Meta AI</strong> or <strong>Google Flow</strong> from the top buttons</li>
-          <li>• Mention packaging format (330g glass jar vs 1kg PET) for accurate prompts</li>
+          <li>• <strong>Save prompt</strong> stores one text prompt (not images or voice files) — reuse in Create image or Create voice</li>
+          <li>• Header: <strong>Gemini Image Creation</strong> and <strong>Flow AI Video Creation</strong> open Google tools in a new tab</li>
         </ul>
       </div>
     </div>

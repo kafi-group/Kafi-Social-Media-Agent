@@ -97,18 +97,27 @@ class LLMClient:
         for msg in messages:
             role = msg.get("role", "user")
             text = (msg.get("content") or "").strip()
+            image_parts: list[dict] = []
+            for attachment in msg.get("images") or []:
+                if not isinstance(attachment, dict):
+                    continue
+                b64 = (attachment.get("image_base64") or "").strip()
+                if not b64:
+                    continue
+                mime = (attachment.get("image_mime_type") or "image/jpeg").strip()
+                image_parts.append(
+                    {
+                        "inlineData": {
+                            "mimeType": mime,
+                            "data": b64,
+                        }
+                    }
+                )
+            # Backward-compatible single-image fields
             image_b64 = (msg.get("image_base64") or "").strip()
-            image_mime = (msg.get("image_mime_type") or "image/jpeg").strip()
-            if not text and not image_b64:
-                continue
-            if role == "system":
-                system_instruction = {"parts": [{"text": text}]}
-                continue
-            parts: list[dict] = []
-            if text:
-                parts.append({"text": text})
-            if image_b64:
-                parts.append(
+            if image_b64 and not image_parts:
+                image_mime = (msg.get("image_mime_type") or "image/jpeg").strip()
+                image_parts.append(
                     {
                         "inlineData": {
                             "mimeType": image_mime,
@@ -116,6 +125,15 @@ class LLMClient:
                         }
                     }
                 )
+            if not text and not image_parts:
+                continue
+            if role == "system":
+                system_instruction = {"parts": [{"text": text}]}
+                continue
+            parts: list[dict] = []
+            if text:
+                parts.append({"text": text})
+            parts.extend(image_parts)
             gemini_role = "model" if role == "assistant" else "user"
             contents.append({"role": gemini_role, "parts": parts})
 

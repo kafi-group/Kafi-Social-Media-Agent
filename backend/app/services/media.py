@@ -5,12 +5,14 @@ Handles file uploads, storage, validation, and retrieval to/from Supabase Storag
 """
 
 import os
+import socket
 import uuid
 import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import requests
 from fastapi import UploadFile
 from app.config import settings
 from app.utils.logger import logger
@@ -107,6 +109,27 @@ def _validate_magic_bytes(content: bytes, extension: str) -> None:
             f"File content does not match the declared type '{ext}'. "
             "Upload a valid file."
         )
+
+
+def _is_supabase_network_error(exc: Exception) -> bool:
+    """True when Supabase is unreachable (DNS, timeout, connection refused)."""
+    if isinstance(exc, (socket.gaierror, TimeoutError, requests.exceptions.RequestException)):
+        return True
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) in {10051, 10060, 11001, 11002}:
+        return True
+    message = str(exc).lower()
+    return any(
+        term in message
+        for term in (
+            "getaddrinfo failed",
+            "name or service not known",
+            "temporary failure in name resolution",
+            "connection refused",
+            "connection timed out",
+            "network is unreachable",
+            "failed to establish a new connection",
+        )
+    )
 
 
 def get_media_type(extension: str) -> str:
@@ -358,6 +381,39 @@ class MediaService:
         """Return the active storage backend (Supabase preferred, local fallback)."""
         return self.supabase if self.is_supabase_configured else self.local
 
+    def _upload_bytes(self, relative_path: str, content: bytes, mime_type: str) -> str:
+        """
+        Upload bytes to Supabase when configured; fall back to local disk if the
+        network cannot reach Supabase (common on restricted DNS / offline dev).
+        """
+        if self.is_supabase_configured:
+            try:
+                return self.supabase.upload(relative_path, content, mime_type)
+            except ContentGenerationError as exc:
+                if _is_supabase_network_error(exc):
+                    logger.warning(
+                        "Supabase unreachable (%s); saving to local uploads instead.",
+                        exc,
+                    )
+                    return self.local.upload(relative_path, content, mime_type)
+                raise
+        return self.local.upload(relative_path, content, mime_type)
+
+    def _download_bytes(self, media_path: str) -> bytes:
+        """Download from Supabase when possible; fall back to local disk."""
+        if self.is_supabase_configured:
+            try:
+                return self.supabase.download(media_path)
+            except ContentGenerationError as exc:
+                if _is_supabase_network_error(exc):
+                    logger.warning(
+                        "Supabase unreachable for download (%s); trying local uploads.",
+                        exc,
+                    )
+                    return self.local.download(media_path)
+                raise
+        return self.local.download(media_path)
+
     async def upload_file(self, file: UploadFile) -> dict:
         """
         Upload a media file and return its metadata.
@@ -410,9 +466,8 @@ class MediaService:
         # Get MIME type
         mime_type = EXTENSION_TO_MIME.get(extension, "application/octet-stream")
 
-        # Upload to the active backend
-        backend = self._get_backend()
-        media_url = backend.upload(relative_path, content, mime_type)
+        # Upload to storage (Supabase with local network fallback)
+        media_url = self._upload_bytes(relative_path, content, mime_type)
 
         logger.info(
             f"Media uploaded: {file.filename} -> {relative_path} "
@@ -454,8 +509,7 @@ class MediaService:
             _validate_magic_bytes(content, ext)
         relative_path, _, _ = _generate_storage_path(original_name or f"generated{ext}", media_type)
         mime_type = EXTENSION_TO_MIME.get(ext, "application/octet-stream")
-        backend = self._get_backend()
-        media_url = backend.upload(relative_path, content, mime_type)
+        media_url = self._upload_bytes(relative_path, content, mime_type)
 
         logger.info(
             f"Generated media saved: {relative_path} "
@@ -482,8 +536,7 @@ class MediaService:
         Raises:
             ContentGenerationError: If file not found or download fails
         """
-        backend = self._get_backend()
-        return backend.download(media_path)
+        return self._download_bytes(media_path)
 
     def download_to_temp(self, media_path: str) -> str:
         """

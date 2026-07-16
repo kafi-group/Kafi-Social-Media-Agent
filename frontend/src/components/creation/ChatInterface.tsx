@@ -10,15 +10,14 @@ import {
   Bot,
   User,
   Trash2,
-  Package,
-  Tag,
-  Box,
   Mic,
-  Users,
   Sparkles,
   ImageIcon,
+  Clapperboard,
   Paperclip,
   X,
+  Bookmark,
+  BookmarkCheck,
 } from 'lucide-react';
 import { API_ENDPOINTS, API_CONFIG, apiFetch, fetchWithTimeout } from '@/lib/api-client';
 import {
@@ -28,6 +27,13 @@ import {
   storeCreationLanguage,
   type CreationLanguageOption,
 } from '@/lib/creation-languages';
+import {
+  clearSavedCreationPrompt,
+  previewSavedPrompt,
+  readSavedCreationPrompt,
+  saveCreationPrompt,
+  type SavedCreationPrompt,
+} from '@/lib/creation-saved-prompts';
 import { useSpeechToText } from '@/hooks/useSpeechToText';
 import type {
   ChatMessage,
@@ -35,7 +41,6 @@ import type {
   CreationIntent,
   CreationModelsResponse,
   ImageGenerateResponse,
-  MatchedProduct,
   VoiceGenerateResponse,
 } from '@/lib/types';
 
@@ -72,10 +77,11 @@ const CREATION_MODES: {
   },
 ];
 
-const GOOGLE_FLOW_CHARACTERS_FALLBACK_URL =
-  'https://labs.google/fx/tools/flow/project/cc16a3ce-33ec-4248-bb1a-3341c7817479/characters';
+const GEMINI_WEB_FALLBACK_URL = 'https://gemini.google.com/app';
+const GOOGLE_FLOW_FALLBACK_URL = 'https://labs.google/fx/tools/flow';
 
 const MAX_REFERENCE_IMAGE_BYTES = 4 * 1024 * 1024;
+const MAX_REFERENCE_IMAGES = 5;
 const ALLOWED_REFERENCE_IMAGE_TYPES = new Set([
   'image/jpeg',
   'image/png',
@@ -84,6 +90,7 @@ const ALLOWED_REFERENCE_IMAGE_TYPES = new Set([
 ]);
 
 interface PendingAttachment {
+  id: string;
   previewUrl: string;
   base64: string;
   mimeType: string;
@@ -114,95 +121,56 @@ function readImageFile(
 }
 
 function toApiMessages(messages: ExtendedChatMessage[]): ChatMessage[] {
-  return messages.map((m) => {
+  // Keep full text history for session memory, but only re-send image bytes
+  // for the latest attachment turn (keeps payload small while preserving product context).
+  let lastImageIndex = -1;
+  messages.forEach((m, i) => {
+    if ((m.images && m.images.length > 0) || m.image_base64) {
+      lastImageIndex = i;
+    }
+  });
+
+  return messages.map((m, i) => {
     const entry: ChatMessage = { role: m.role, content: m.content };
-    if (m.image_base64) {
-      entry.image_base64 = m.image_base64;
-      entry.image_mime_type = m.image_mime_type ?? 'image/jpeg';
+    const imageCount = m.images?.length
+      ? m.images.length
+      : m.image_base64
+        ? 1
+        : 0;
+
+    if (imageCount > 0 && i === lastImageIndex) {
+      if (m.images?.length) {
+        entry.images = m.images.map((img) => ({
+          image_base64: img.image_base64,
+          image_mime_type: img.image_mime_type ?? 'image/jpeg',
+        }));
+      } else if (m.image_base64) {
+        entry.image_base64 = m.image_base64;
+        entry.image_mime_type = m.image_mime_type ?? 'image/jpeg';
+      }
+    } else if (imageCount > 0) {
+      entry.content = [
+        m.content.trim(),
+        `[Earlier in this chat the user attached ${imageCount} reference image${
+          imageCount === 1 ? '' : 's'
+        }. Keep using that product/visual context for follow-ups.]`,
+      ]
+        .filter(Boolean)
+        .join('\n\n');
     }
     return entry;
   });
 }
-const CATEGORY_COLOURS: Record<string, string> = {
-  'Pickles': 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300',
-  'Chutneys': 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300',
-  'Pastes': 'bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-300',
-  'Sauces': 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300',
-  'Himalayan Salt': 'bg-pink-100 text-pink-800 dark:bg-pink-900/40 dark:text-pink-300',
-  'Salt': 'bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-300',
-  'Specialty Salts': 'bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-300',
-  'Vermicelli & Sweets': 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300',
-  'Fried Onion': 'bg-lime-100 text-lime-800 dark:bg-lime-900/40 dark:text-lime-300',
-  'Moringa Products': 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300',
-  'Moringa Beauty & Personal Care': 'bg-teal-100 text-teal-800 dark:bg-teal-900/40 dark:text-teal-300',
-  'Masalas & Spice Blends': 'bg-rose-100 text-rose-800 dark:bg-rose-900/40 dark:text-rose-300',
-};
-
-function categoryColour(category: string): string {
-  return CATEGORY_COLOURS[category] ?? 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200';
-}
 
 // ---------------------------------------------------------------------------
-// Product Card component
-// ---------------------------------------------------------------------------
-
-function ProductCard({ product }: { product: MatchedProduct }) {
-  return (
-    <div className="mb-3 rounded-xl border border-brand-200 bg-gradient-to-br from-brand-50 to-white shadow-sm overflow-hidden dark:from-brand-950/40 dark:to-slate-800 dark:border-brand-700">
-      {/* Header strip */}
-      <div className="flex items-center gap-2 px-4 py-2.5 bg-brand-600 dark:bg-brand-800">
-        <Package className="w-4 h-4 text-white flex-shrink-0" />
-        <span className="text-sm font-semibold text-white truncate">{product.name}</span>
-        <span className="ml-auto text-xs text-brand-200 flex-shrink-0">{product.brand}</span>
-      </div>
-
-      {/* Body */}
-      <div className="px-4 py-3 space-y-2.5">
-        {/* Category badge */}
-        <div className="flex items-center gap-1.5">
-          <Tag className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
-          <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${categoryColour(product.category)}`}>
-            {product.category}
-          </span>
-        </div>
-
-        {/* Description */}
-        <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-          {product.description}
-        </p>
-
-        {/* Packaging */}
-        <div>
-          <div className="flex items-center gap-1.5 mb-1.5">
-            <Box className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
-            <span className="text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wide">
-              Available Packaging
-            </span>
-          </div>
-          <ul className="space-y-1">
-            {product.packaging.map((pkg, i) => (
-              <li
-                key={i}
-                className="text-xs text-slate-600 dark:text-slate-300 flex items-start gap-1.5"
-              >
-                <span className="mt-0.5 w-1.5 h-1.5 rounded-full bg-brand-400 flex-shrink-0" />
-                {pkg}
-              </li>
-            ))}
-          </ul>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Extended message type (includes optional matched product)
+// Extended message type
 // ---------------------------------------------------------------------------
 
 interface ExtendedChatMessage extends ChatMessage {
-  matchedProduct?: MatchedProduct | null;
   generatedImageUrl?: string | null;
+  generatedImageProvider?: string | null;
+  generatedImageModel?: string | null;
+  generatedImageFallbackReason?: string | null;
   generatedAudioUrl?: string | null;
   imageGenerationError?: string | null;
   intent?: CreationIntent;
@@ -214,9 +182,8 @@ interface ExtendedChatMessage extends ChatMessage {
 
 export default function ChatInterface() {
   const [modelLabel, setModelLabel] = useState<string>('Loading…');
-  const [googleFlowCharactersUrl, setGoogleFlowCharactersUrl] = useState<string>(
-    GOOGLE_FLOW_CHARACTERS_FALLBACK_URL
-  );
+  const [geminiWebUrl, setGeminiWebUrl] = useState<string>(GEMINI_WEB_FALLBACK_URL);
+  const [googleFlowUrl, setGoogleFlowUrl] = useState<string>(GOOGLE_FLOW_FALLBACK_URL);
   const [chatReady, setChatReady] = useState<boolean>(true);
   const [imageReady, setImageReady] = useState<boolean>(false);
   const [imageModelLabel, setImageModelLabel] = useState<string>('');
@@ -237,7 +204,10 @@ export default function ChatInterface() {
   const [generatingImageIndex, setGeneratingImageIndex] = useState<number | null>(null);
   const [generatingVoiceIndex, setGeneratingVoiceIndex] = useState<number | null>(null);
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
-  const [pendingAttachment, setPendingAttachment] = useState<PendingAttachment | null>(null);
+  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+  const [savedPrompt, setSavedPrompt] = useState<SavedCreationPrompt | null>(() =>
+    typeof window !== 'undefined' ? readSavedCreationPrompt() : null
+  );
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -279,9 +249,8 @@ export default function ChatInterface() {
       if (!res.ok) throw new Error('Failed to load models');
       const data: CreationModelsResponse = await res.json();
       setModelLabel(data.models[0]?.label ?? 'AI Assistant');
-      setGoogleFlowCharactersUrl(
-        data.google_flow_characters_url || GOOGLE_FLOW_CHARACTERS_FALLBACK_URL
-      );
+      setGeminiWebUrl(data.gemini_web_url || GEMINI_WEB_FALLBACK_URL);
+      setGoogleFlowUrl(GOOGLE_FLOW_FALLBACK_URL);
       setChatReady(data.chat_ready);
       const ready = Boolean(data.image_ready);
       const imageModel = data.image_model ?? '';
@@ -321,7 +290,7 @@ export default function ChatInterface() {
 
   const sendMessage = async () => {
     const text = input.trim();
-    const hasAttachment = Boolean(pendingAttachment);
+    const hasAttachment = pendingAttachments.length > 0;
     if ((!text && !hasAttachment) || sending) return;
 
     if (!chatReady) {
@@ -335,19 +304,23 @@ export default function ChatInterface() {
       role: 'user',
       content:
         text ||
-        'Analyze the attached reference image and write a detailed Essence product marketing prompt that matches its style.',
-      ...(pendingAttachment
+        (pendingAttachments.length > 1
+          ? `Analyze all ${pendingAttachments.length} attached reference images carefully and write a detailed marketing prompt that matches their combined style and my request.`
+          : 'Analyze the attached reference image carefully and write a detailed marketing prompt that matches its style and my request.'),
+      ...(pendingAttachments.length
         ? {
-            image_base64: pendingAttachment.base64,
-            image_mime_type: pendingAttachment.mimeType,
-            image_preview_url: pendingAttachment.previewUrl,
+            images: pendingAttachments.map((a) => ({
+              image_base64: a.base64,
+              image_mime_type: a.mimeType,
+              image_preview_url: a.previewUrl,
+            })),
           }
         : {}),
     };
     const nextMessages = [...messages, userMsg];
     setMessages(nextMessages);
     setInput('');
-    setPendingAttachment(null);
+    setPendingAttachments([]);
     setSending(true);
 
     try {
@@ -369,7 +342,6 @@ export default function ChatInterface() {
       const assistantMsg: ExtendedChatMessage = {
         role: 'assistant',
         content: data.reply,
-        matchedProduct: data.matched_product ?? null,
         intent: creationIntent,
       };
       const assistantIndex = nextMessages.length;
@@ -401,8 +373,55 @@ export default function ChatInterface() {
     }
   };
 
-  const openGoogleFlowCharacters = () => {
-    window.open(googleFlowCharactersUrl, '_blank', 'noopener,noreferrer');
+  const startNewChat = () => {
+    if (sending) return;
+    setMessages([]);
+    setPendingAttachments([]);
+    setInput('');
+    setCopiedIndex(null);
+    setGeneratingImageIndex(null);
+    setGeneratingVoiceIndex(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+    toast.success('Started a new chat — previous memory cleared.');
+  };
+
+  const openGeminiWeb = () => {
+    window.open(geminiWebUrl, '_blank', 'noopener,noreferrer');
+  };
+
+  const openFlowAI = () => {
+    window.open(googleFlowUrl, '_blank', 'noopener,noreferrer');
+  };
+
+  useEffect(() => {
+    setSavedPrompt(readSavedCreationPrompt());
+  }, []);
+
+  const handleSavePrompt = (text: string) => {
+    try {
+      const entry = saveCreationPrompt(text);
+      setSavedPrompt(entry);
+      toast.success('Prompt saved (text only) — reuse in Create image or Create voice');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Could not save prompt');
+    }
+  };
+
+  const handleUseSavedPrompt = () => {
+    if (!savedPrompt?.text?.trim()) {
+      toast.error('No saved prompt yet — save prompt text from an assistant reply first');
+      return;
+    }
+    setInput(savedPrompt.text);
+    toast.success('Loaded saved prompt into the box — send when ready');
+  };
+
+  const handleClearSavedPrompt = () => {
+    clearSavedCreationPrompt();
+    setSavedPrompt(null);
+    toast.success('Cleared saved prompt');
   };
 
   const runGenerateImage = async (index: number, promptText: string) => {
@@ -435,11 +454,30 @@ export default function ChatInterface() {
       setMessages((prev) =>
         prev.map((m, i) =>
           i === index
-            ? { ...m, generatedImageUrl: data.media_url, imageGenerationError: null }
+            ? {
+                ...m,
+                generatedImageUrl: data.media_url,
+                generatedImageProvider: data.provider || null,
+                generatedImageModel: data.model || null,
+                generatedImageFallbackReason: data.fallback_reason || null,
+                imageGenerationError: null,
+              }
             : m
         )
       );
-      toast.success('Image generated in-app');
+      if (data.provider === 'gemini') {
+        toast.success('Image generated by Gemini');
+      } else if (data.provider === 'cloudflare') {
+        toast.success(
+          data.fallback_reason
+            ? 'Gemini unavailable — image generated by Cloudflare Flux'
+            : 'Image generated by Cloudflare Flux'
+        );
+      } else if (data.provider === 'modelslab') {
+        toast.success('Image generated by ModelsLab');
+      } else {
+        toast.success('Image generated in-app');
+      }
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Image generation failed';
       setMessages((prev) =>
@@ -508,39 +546,64 @@ export default function ChatInterface() {
     }
   };
 
-  const clearPendingAttachment = () => {
-    setPendingAttachment(null);
+  const clearPendingAttachments = () => {
+    setPendingAttachments([]);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  const removePendingAttachment = (id: string) => {
+    setPendingAttachments((prev) => prev.filter((a) => a.id !== id));
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
   };
 
   const handleImageFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = Array.from(e.target.files ?? []);
+    if (!files.length) return;
 
-    if (!ALLOWED_REFERENCE_IMAGE_TYPES.has(file.type)) {
-      toast.error('Use JPEG, PNG, WebP, or GIF.');
-      e.target.value = '';
-      return;
-    }
-    if (file.size > MAX_REFERENCE_IMAGE_BYTES) {
-      toast.error('Image must be under 4 MB.');
+    const remainingSlots = MAX_REFERENCE_IMAGES - pendingAttachments.length;
+    if (remainingSlots <= 0) {
+      toast.error(`You can attach up to ${MAX_REFERENCE_IMAGES} images.`);
       e.target.value = '';
       return;
     }
 
-    try {
-      const { base64, previewUrl, mimeType } = await readImageFile(file);
-      setPendingAttachment({
-        base64,
-        previewUrl,
-        mimeType,
-        name: file.name,
-      });
-    } catch {
-      toast.error('Could not read image file.');
+    const selected = files.slice(0, remainingSlots);
+    if (files.length > remainingSlots) {
+      toast.error(`Only ${MAX_REFERENCE_IMAGES} images allowed — added the first ${remainingSlots}.`);
     }
+
+    const accepted: PendingAttachment[] = [];
+    for (const file of selected) {
+      if (!ALLOWED_REFERENCE_IMAGE_TYPES.has(file.type)) {
+        toast.error(`${file.name}: use JPEG, PNG, WebP, or GIF.`);
+        continue;
+      }
+      if (file.size > MAX_REFERENCE_IMAGE_BYTES) {
+        toast.error(`${file.name}: must be under 4 MB.`);
+        continue;
+      }
+      try {
+        const { base64, previewUrl, mimeType } = await readImageFile(file);
+        accepted.push({
+          id: `${file.name}-${file.size}-${file.lastModified}-${Math.random().toString(36).slice(2, 8)}`,
+          base64,
+          previewUrl,
+          mimeType,
+          name: file.name,
+        });
+      } catch {
+        toast.error(`Could not read ${file.name}.`);
+      }
+    }
+
+    if (accepted.length) {
+      setPendingAttachments((prev) => [...prev, ...accepted].slice(0, MAX_REFERENCE_IMAGES));
+    }
+    e.target.value = '';
   };
 
   return (
@@ -589,25 +652,70 @@ export default function ChatInterface() {
           </select>
         )}
         <button
-          onClick={openGoogleFlowCharacters}
+          type="button"
+          onClick={openGeminiWeb}
           className="inline-flex shrink-0 items-center gap-1.5 text-sm font-medium text-brand-700 hover:text-brand-900 border border-brand-200 hover:bg-brand-50 rounded-lg px-3 py-1.5 transition-colors dark:text-gold-300 dark:hover:text-gold-200 dark:border-slate-500 dark:hover:bg-slate-700"
-          title="Create characters in Google Flow"
+          title="Open Google Gemini to create images"
         >
-          <Users className="w-4 h-4" />
-          Create Characters in Google Flow
+          <ImageIcon className="w-4 h-4" />
+          Gemini Image Creation
+        </button>
+        <button
+          type="button"
+          onClick={openFlowAI}
+          className="inline-flex shrink-0 items-center gap-1.5 text-sm font-medium text-brand-700 hover:text-brand-900 border border-brand-200 hover:bg-brand-50 rounded-lg px-3 py-1.5 transition-colors dark:text-gold-300 dark:hover:text-gold-200 dark:border-slate-500 dark:hover:bg-slate-700"
+          title="Open Google Flow for AI video creation"
+        >
+          <Clapperboard className="w-4 h-4" />
+          Flow AI Video Creation
         </button>
 
         {messages.length > 0 && (
           <button
-            onClick={() => setMessages([])}
+            onClick={startNewChat}
             className="inline-flex shrink-0 items-center gap-1.5 text-sm text-slate-500 hover:text-red-600 transition-colors"
-            title="Clear conversation"
+            title="End this chat and start fresh (clears conversation memory)"
           >
             <Trash2 className="w-4 h-4" />
-            Clear
+            New chat
           </button>
         )}
       </div>
+
+      {savedPrompt ? (
+        <div className="mx-4 mt-4 rounded-lg border border-emerald-200 bg-emerald-50/80 px-3 py-2.5 dark:border-emerald-800/60 dark:bg-emerald-950/30">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-semibold text-emerald-900 dark:text-emerald-200 flex items-center gap-1.5">
+                <BookmarkCheck className="w-3.5 h-3.5" />
+                Saved prompt (text only)
+              </p>
+              <p className="text-[11px] text-emerald-800/80 dark:text-emerald-100/70 mt-0.5">
+                Reuse in Create image, Create voice, or Write prompt — not images or audio files.
+              </p>
+              <p className="text-xs text-emerald-800/90 dark:text-emerald-100/80 mt-1 line-clamp-2">
+                {previewSavedPrompt(savedPrompt.text)}
+              </p>
+            </div>
+            <div className="flex shrink-0 flex-wrap gap-1.5">
+              <button
+                type="button"
+                onClick={handleUseSavedPrompt}
+                className="text-xs font-medium rounded-md px-2.5 py-1 border border-emerald-300 text-emerald-900 hover:bg-emerald-100 dark:border-emerald-700 dark:text-emerald-100 dark:hover:bg-emerald-900/40"
+              >
+                Use saved prompt
+              </button>
+              <button
+                type="button"
+                onClick={handleClearSavedPrompt}
+                className="text-xs text-emerald-800/80 hover:text-red-700 dark:text-emerald-200/80 dark:hover:text-red-300 px-2 py-1"
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {/* Messages */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -619,6 +727,9 @@ export default function ChatInterface() {
               <strong>Create voice</strong> writes a script you can turn into audio, and{' '}
               <strong>Write prompt</strong> gives copy-paste text for Meta AI or Flow. Choose a{' '}
               <strong>language</strong> in the toolbar for replies in English, Urdu, Arabic, and more.
+              This chat remembers your product details until you click <strong>New chat</strong>.
+              <strong> Save prompt</strong> stores one text prompt in your browser (not images or voice files)
+              — reuse it in <strong>Create image</strong> or <strong>Create voice</strong> anytime.
             </p>
             {/* Quick-start suggestions */}
             <div className="flex flex-wrap justify-center gap-2 text-xs">
@@ -656,11 +767,6 @@ export default function ChatInterface() {
               )}
 
               <div className={`max-w-[75%] space-y-2 ${isUser ? 'items-end' : 'items-start'} flex flex-col`}>
-                {/* Product card — shown only on assistant messages with a matched product */}
-                {!isUser && msg.matchedProduct && (
-                  <ProductCard product={msg.matchedProduct} />
-                )}
-
                 {!isUser && generatingImageIndex === index && (
                   <div className="text-xs text-brand-700 dark:text-gold-300 flex items-center gap-1.5">
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -701,6 +807,28 @@ export default function ChatInterface() {
                         );
                       }}
                     />
+                    <div className="px-3 py-2 bg-slate-50 border-t border-slate-200 dark:bg-slate-900/70 dark:border-slate-600 space-y-1">
+                      <p className="text-xs font-medium text-slate-700 dark:text-slate-200">
+                        Generated by{' '}
+                        {msg.generatedImageProvider === 'cloudflare'
+                          ? 'Cloudflare Flux'
+                          : msg.generatedImageProvider === 'gemini'
+                            ? 'Gemini'
+                            : msg.generatedImageProvider === 'modelslab'
+                              ? 'ModelsLab'
+                              : 'AI'}
+                      </p>
+                      {msg.generatedImageModel ? (
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate" title={msg.generatedImageModel}>
+                          Model: {msg.generatedImageModel}
+                        </p>
+                      ) : null}
+                      {msg.generatedImageFallbackReason ? (
+                        <p className="text-[11px] text-amber-700 dark:text-amber-300">
+                          {msg.generatedImageFallbackReason}
+                        </p>
+                      ) : null}
+                    </div>
                   </div>
                 )}
                 {!isUser && msg.generatedAudioUrl && (
@@ -714,14 +842,29 @@ export default function ChatInterface() {
                 )}
 
                 {/* Chat bubble */}
-                {isUser && msg.image_preview_url && (
-                  <div className="rounded-xl overflow-hidden border border-brand-200 dark:border-slate-500 max-w-xs">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={msg.image_preview_url}
-                      alt="Reference attachment"
-                      className="w-full h-auto max-h-48 object-contain bg-white dark:bg-slate-900"
-                    />
+                {isUser && (msg.images?.length || msg.image_preview_url) && (
+                  <div className="flex flex-wrap gap-2 max-w-md">
+                    {(msg.images?.length
+                      ? msg.images.map((img, imgIndex) => ({
+                          key: `${index}-img-${imgIndex}`,
+                          src: img.image_preview_url,
+                        }))
+                      : [{ key: `${index}-img-0`, src: msg.image_preview_url }]
+                    )
+                      .filter((item) => Boolean(item.src))
+                      .map((item) => (
+                        <div
+                          key={item.key}
+                          className="rounded-xl overflow-hidden border border-brand-200 dark:border-slate-500 w-28"
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={item.src!}
+                            alt="Reference attachment"
+                            className="w-full h-auto max-h-28 object-cover bg-white dark:bg-slate-900"
+                          />
+                        </div>
+                      ))}
                   </div>
                 )}
                 {showTextBubble && (
@@ -765,6 +908,15 @@ export default function ChatInterface() {
                       )}
                       {msg.generatedImageUrl ? 'Regenerate image' : 'Generate image'}
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => handleSavePrompt(msg.content)}
+                      className="inline-flex items-center gap-1 text-xs font-medium rounded-lg px-2.5 py-1.5 border border-slate-200 text-slate-700 hover:bg-slate-50 dark:border-slate-500 dark:text-slate-200 dark:hover:bg-slate-700"
+                      title="Save this prompt text for reuse (not the image file)"
+                    >
+                      <Bookmark className="w-3.5 h-3.5" />
+                      Save prompt
+                    </button>
                   </div>
                 )}
                 {!isUser && msgIntent === 'create_voice' && (
@@ -781,6 +933,28 @@ export default function ChatInterface() {
                         <Mic className="w-3.5 h-3.5" />
                       )}
                       Generate voice
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleSavePrompt(msg.content)}
+                      className="inline-flex items-center gap-1 text-xs font-medium rounded-lg px-2.5 py-1.5 border border-slate-200 text-slate-700 hover:bg-slate-50 dark:border-slate-500 dark:text-slate-200 dark:hover:bg-slate-700"
+                      title="Save this script text for reuse (not the audio file)"
+                    >
+                      <Bookmark className="w-3.5 h-3.5" />
+                      Save prompt
+                    </button>
+                  </div>
+                )}
+                {!isUser && msgIntent === 'prompt' && (
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => handleSavePrompt(msg.content)}
+                      className="inline-flex items-center gap-1 text-xs font-medium rounded-lg px-2.5 py-1.5 border border-slate-200 text-slate-700 hover:bg-slate-50 dark:border-slate-500 dark:text-slate-200 dark:hover:bg-slate-700"
+                      title="Save this prompt text for reuse in Create image or Create voice"
+                    >
+                      <Bookmark className="w-3.5 h-3.5" />
+                      Save prompt
                     </button>
                   </div>
                 )}
@@ -844,15 +1018,16 @@ export default function ChatInterface() {
             ref={fileInputRef}
             type="file"
             accept="image/jpeg,image/png,image/webp,image/gif"
+            multiple
             className="hidden"
             onChange={handleImageFileChange}
           />
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            disabled={sending || isListening}
+            disabled={sending || isListening || pendingAttachments.length >= MAX_REFERENCE_IMAGES}
             className="inline-flex shrink-0 items-center justify-center rounded-lg border border-slate-300 p-2.5 text-slate-600 hover:bg-slate-50 hover:text-brand-700 disabled:opacity-50 dark:border-slate-500 dark:text-slate-300 dark:hover:bg-slate-700"
-            title="Attach reference image for vision-based prompt writing"
+            title={`Attach up to ${MAX_REFERENCE_IMAGES} reference images (${pendingAttachments.length}/${MAX_REFERENCE_IMAGES})`}
           >
             <Paperclip className="w-4 h-4" />
           </button>
@@ -888,8 +1063,8 @@ export default function ChatInterface() {
             placeholder={
               isListening
                 ? 'Listening… speak your prompt, then click the mic to stop.'
-                : pendingAttachment
-                  ? 'Describe the Essence product to adapt to this reference (optional)…'
+                : pendingAttachments.length
+                  ? 'Add optional details about what to create from these references…'
                   : activeMode.placeholder
             }
             rows={2}
@@ -898,38 +1073,53 @@ export default function ChatInterface() {
           />
           <button
             onClick={sendMessage}
-            disabled={sending || (!input.trim() && !pendingAttachment)}
+            disabled={sending || (!input.trim() && !pendingAttachments.length)}
             className="inline-flex items-center gap-1.5 text-sm font-medium rounded-lg px-4 py-2.5 bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             <Send className="w-4 h-4" />
-            {creationIntent === 'create_image' && !pendingAttachment ? 'Create' : 'Send'}
+            {creationIntent === 'create_image' && !pendingAttachments.length ? 'Create' : 'Send'}
           </button>
         </div>
-        {pendingAttachment && (
-          <div className="flex items-center gap-3 rounded-lg border border-brand-200 bg-brand-50/80 px-3 py-2 dark:border-slate-500 dark:bg-slate-700/60">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={pendingAttachment.previewUrl}
-              alt="Pending reference"
-              className="h-14 w-14 rounded-md object-cover border border-slate-200 dark:border-slate-500"
-            />
-            <div className="min-w-0 flex-1">
-              <p className="text-xs font-medium text-slate-700 dark:text-slate-200 truncate">
-                {pendingAttachment.name}
-              </p>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                Reference image — AI uses it to craft your{' '}
+        {pendingAttachments.length > 0 && (
+          <div className="rounded-lg border border-brand-200 bg-brand-50/80 px-3 py-2 dark:border-slate-500 dark:bg-slate-700/60 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs font-medium text-slate-700 dark:text-slate-200">
+                Reference images ({pendingAttachments.length}/{MAX_REFERENCE_IMAGES}) — the AI
+                analyzes all of them together for your{' '}
                 {creationIntent === 'create_image' ? 'generated visual' : 'prompt'}.
               </p>
+              <button
+                type="button"
+                onClick={clearPendingAttachments}
+                className="text-xs text-slate-500 hover:text-red-600 dark:text-slate-400"
+              >
+                Clear all
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={clearPendingAttachment}
-              className="shrink-0 rounded-full p-1 text-slate-500 hover:bg-white hover:text-red-600 dark:hover:bg-slate-600"
-              title="Remove attachment"
-            >
-              <X className="w-4 h-4" />
-            </button>
+            <div className="flex flex-wrap gap-2">
+              {pendingAttachments.map((attachment) => (
+                <div
+                  key={attachment.id}
+                  className="relative group rounded-md overflow-hidden border border-slate-200 dark:border-slate-500"
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={attachment.previewUrl}
+                    alt={attachment.name}
+                    className="h-14 w-14 object-cover bg-white dark:bg-slate-900"
+                    title={attachment.name}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removePendingAttachment(attachment.id)}
+                    className="absolute top-0.5 right-0.5 rounded-full bg-black/60 p-0.5 text-white opacity-90 hover:bg-red-600"
+                    title={`Remove ${attachment.name}`}
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
         )}
         {isListening && (
