@@ -292,6 +292,21 @@ class AnalyticsMetric(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class PlatformCredential(Base):
+    """
+    Persisted OAuth secrets for social platforms (Meta / YouTube).
+    Survives deploys so analytics tokens do not need manual re-paste into .env.
+    """
+
+    __tablename__ = "platform_credential"
+
+    id = Column(Integer, primary_key=True)
+    key = Column(String(100), unique=True, nullable=False)
+    value = Column(Text, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class User(Base):
     """System users (placeholder for authentication)."""
 

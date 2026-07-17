@@ -1,34 +1,40 @@
 """
 Meta (Facebook + Instagram) OAuth 2.0 re-authorization route.
 
-Generates a long-lived Page access token that never expires (as long as the
-user does not revoke app access). Use this when FACEBOOK_PAGE_ACCESS_TOKEN
-expires and analytics / posting stop working.
+Exchanges the login code for a long-lived user token, derives a non-expiring
+Page access token, and auto-saves both into runtime settings + DB + .env so
+analytics keep working without manual paste/restart.
 
-Usage:
-  1. Add FACEBOOK_APP_ID and FACEBOOK_APP_SECRET to backend/.env
-     (find them in your Meta App Dashboard under App Settings → Basic)
-  2. Add the callback URI to your app's Valid OAuth Redirect URIs:
-     http://localhost:8000/api/v1/auth/meta/callback
-  3. Visit http://localhost:8000/api/v1/auth/meta while the backend is running
-  4. Log in and approve permissions
-  5. Copy the new token from the success page into FACEBOOK_PAGE_ACCESS_TOKEN
+Usage (live Railway):
+  1. Set FACEBOOK_APP_ID / FACEBOOK_APP_SECRET on Railway
+  2. Add FACEBOOK_REDIRECT_URI (Railway callback) in Meta App → Valid OAuth Redirect URIs
+  3. Visit https://kafi-social-agent.up.railway.app/api/v1/auth/meta
+  4. Approve permissions — tokens are saved automatically
 """
 
+from datetime import datetime
 from urllib.parse import urlencode
 
 import requests
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from app.config import settings
+from app.config import public_api_url, settings
+from app.services.meta_token_service import (
+    debug_token,
+    exchange_long_lived_user_token,
+    fetch_page_access_token,
+    persist_meta_tokens,
+    refresh_meta_tokens,
+    resolve_instagram_account_id,
+)
+from app.services.token_store import credential_status
 from app.utils.logger import logger
 
 router = APIRouter()
 
 FACEBOOK_AUTH_URL = "https://www.facebook.com/v21.0/dialog/oauth"
 FACEBOOK_TOKEN_URL = "https://graph.facebook.com/oauth/access_token"
-FACEBOOK_DEBUG_TOKEN_URL = "https://graph.facebook.com/debug_token"
 
 REQUIRED_SCOPES = [
     "pages_show_list",
@@ -43,88 +49,7 @@ REQUIRED_SCOPES = [
 ]
 
 
-def _debug_token_info(access_token: str) -> dict:
-    """Return Meta debug_token payload for the given token (expiry, type, scopes)."""
-    if not access_token or not settings.FACEBOOK_APP_ID or not settings.FACEBOOK_APP_SECRET:
-        return {}
-    try:
-        resp = requests.get(
-            FACEBOOK_DEBUG_TOKEN_URL,
-            params={
-                "input_token": access_token,
-                "access_token": f"{settings.FACEBOOK_APP_ID}|{settings.FACEBOOK_APP_SECRET}",
-            },
-            timeout=20,
-        )
-        if resp.ok:
-            return resp.json().get("data", {}) or {}
-    except requests.RequestException as exc:
-        logger.warning(f"Meta debug_token failed: {exc}")
-    return {}
-
-
-def _fetch_page_access_token(long_lived_user_token: str, page_id: str) -> tuple[str, str, str]:
-    """
-    Resolve a Page access token from a long-lived user token.
-
-    Returns (token, page_name, note). Page tokens derived from long-lived user
-    tokens do not expire unless app access is revoked.
-    """
-    graph_url = f"https://graph.facebook.com/{settings.META_GRAPH_API_VERSION}"
-    page_id = page_id.strip()
-
-    # Preferred: direct page lookup when FACEBOOK_PAGE_ID is configured.
-    if page_id:
-        try:
-            page_resp = requests.get(
-                f"{graph_url}/{page_id}",
-                params={
-                    "fields": "access_token,name",
-                    "access_token": long_lived_user_token,
-                },
-                timeout=30,
-            )
-            if page_resp.ok:
-                page_data = page_resp.json()
-                token = page_data.get("access_token", "")
-                if token:
-                    return token, page_data.get("name", "your page"), ""
-            logger.warning(f"Direct page token fetch failed: {page_resp.text[:200]}")
-        except requests.RequestException as exc:
-            logger.warning(f"Direct page token fetch error: {exc}")
-
-    # Fallback: list managed pages and match by id.
-    try:
-        accounts_resp = requests.get(
-            f"{graph_url}/me/accounts",
-            params={
-                "fields": "id,name,access_token",
-                "access_token": long_lived_user_token,
-            },
-            timeout=30,
-        )
-        if accounts_resp.ok:
-            for page in accounts_resp.json().get("data", []):
-                if page_id and str(page.get("id")) != page_id:
-                    continue
-                token = page.get("access_token", "")
-                if token:
-                    return token, page.get("name", "your page"), ""
-            if page_id:
-                return (
-                    "",
-                    "",
-                    f"No managed page matched FACEBOOK_PAGE_ID={page_id}. "
-                    "Confirm you are an admin of that page.",
-                )
-    except requests.RequestException as exc:
-        logger.warning(f"me/accounts page token fetch error: {exc}")
-
-    return "", "", "Could not resolve a Page access token from your Facebook login."
-
-
 def _list_managed_pages(long_lived_user_token: str) -> list[dict]:
-    """Return Facebook Pages the user can manage, with linked Instagram accounts."""
     graph_url = f"https://graph.facebook.com/{settings.META_GRAPH_API_VERSION}"
     try:
         accounts_resp = requests.get(
@@ -158,15 +83,14 @@ def _format_managed_pages_html(pages: list[dict], current_page_id: str) -> str:
                 f"<br>Instagram: @{ig_user} "
                 f"(<code>INSTAGRAM_ACCOUNT_ID={ig.get('id')}</code>)"
             )
-        marker = " <strong>← currently in .env</strong>" if is_current else ""
+        marker = " <strong>← currently configured</strong>" if is_current else ""
         rows.append(
             f"<li><strong>{page.get('name', 'Page')}</strong>{marker}<br>"
             f"<code>FACEBOOK_PAGE_ID={page_id}</code>{ig_line}</li>"
         )
     return f"""
           <h3>All Facebook Pages you manage</h3>
-          <p>Pick your <strong>production</strong> page (not a sandbox/test page) and update
-          <code>backend/.env</code> before restarting:</p>
+          <p>Confirm your <strong>production</strong> page ID is set in the environment:</p>
           <ul>{''.join(rows)}</ul>
     """
 
@@ -176,19 +100,60 @@ def _format_expiry(debug_data: dict) -> str:
     if expires_at in (None, 0):
         return "does not expire (Page token)"
     try:
-        from datetime import datetime
-
         return datetime.utcfromtimestamp(int(expires_at)).strftime("%Y-%m-%d %H:%M UTC")
     except (TypeError, ValueError, OSError):
         return str(expires_at)
 
 
+@router.get("/auth/meta/status")
+async def meta_auth_status():
+    """Show Meta token health (no secrets)."""
+    page_token = (settings.FACEBOOK_PAGE_ACCESS_TOKEN or "").strip()
+    user_token = (settings.FACEBOOK_USER_ACCESS_TOKEN or "").strip()
+    page_debug = debug_token(page_token) if page_token else {}
+    user_debug = debug_token(user_token) if user_token else {}
+    return {
+        "configured": bool(page_token and settings.FACEBOOK_PAGE_ID),
+        "page_id": settings.FACEBOOK_PAGE_ID or None,
+        "instagram_account_id": settings.INSTAGRAM_ACCOUNT_ID or None,
+        "has_page_token": bool(page_token),
+        "has_user_token": bool(user_token),
+        "page_token_valid": page_debug.get("is_valid"),
+        "page_token_expires": _format_expiry(page_debug) if page_debug else None,
+        "user_token_valid": user_debug.get("is_valid"),
+        "user_token_expires": _format_expiry(user_debug) if user_debug else None,
+        "auto_refresh_ready": bool(user_token),
+        "stored": credential_status(
+            [
+                "FACEBOOK_PAGE_ACCESS_TOKEN",
+                "FACEBOOK_USER_ACCESS_TOKEN",
+                "INSTAGRAM_ACCOUNT_ID",
+            ]
+        ),
+        "auth_url": public_api_url("/api/v1/auth/meta"),
+        "redirect_uri": settings.FACEBOOK_REDIRECT_URI,
+        "message": (
+            "Meta tokens are ready; the scheduler will keep the user token extended."
+            if page_token and user_token
+            else (
+                f"Page token present. Re-authorize once via {public_api_url('/api/v1/auth/meta')} "
+                "to enable automatic renewal (stores FACEBOOK_USER_ACCESS_TOKEN)."
+                if page_token
+                else f"Visit {public_api_url('/api/v1/auth/meta')} to connect Facebook + Instagram."
+            )
+        ),
+    }
+
+
+@router.post("/auth/meta/refresh")
+async def meta_auth_refresh():
+    """Manually trigger Meta token refresh / Page token re-derivation."""
+    return refresh_meta_tokens(force=True)
+
+
 @router.get("/auth/meta")
 async def meta_auth_start():
-    """
-    Start Meta OAuth — redirects to Facebook login/consent screen.
-    Requires FACEBOOK_APP_ID and FACEBOOK_APP_SECRET in .env.
-    """
+    """Start Meta OAuth — redirects to Facebook login/consent screen."""
     if not settings.FACEBOOK_APP_ID or not settings.FACEBOOK_APP_SECRET:
         raise HTTPException(
             status_code=400,
@@ -215,10 +180,7 @@ async def meta_auth_callback(
     error: str = Query(default=""),
     error_description: str = Query(default=""),
 ):
-    """
-    Exchange Facebook OAuth code for a long-lived Page access token.
-    Displays the new token so you can paste it into .env.
-    """
+    """Exchange Facebook OAuth code and auto-save long-lived tokens."""
     if error:
         raise HTTPException(
             status_code=400,
@@ -227,7 +189,6 @@ async def meta_auth_callback(
     if not code:
         raise HTTPException(status_code=400, detail="Missing authorization code.")
 
-    # Step 1: Exchange code for a short-lived user access token
     try:
         token_resp = requests.get(
             FACEBOOK_TOKEN_URL,
@@ -253,43 +214,24 @@ async def meta_auth_callback(
     if not short_lived_token:
         raise HTTPException(status_code=400, detail="Facebook did not return an access token.")
 
-    # Step 2: Exchange for a long-lived user token (valid ~60 days)
     try:
-        ll_resp = requests.get(
-            FACEBOOK_TOKEN_URL,
-            params={
-                "grant_type": "fb_exchange_token",
-                "client_id": settings.FACEBOOK_APP_ID,
-                "client_secret": settings.FACEBOOK_APP_SECRET,
-                "fb_exchange_token": short_lived_token,
-            },
-            timeout=30,
-        )
-    except requests.RequestException as exc:
-        logger.error(f"Meta long-lived token exchange failed: {exc}")
-        raise HTTPException(status_code=502, detail="Failed to get long-lived token.") from exc
-
-    if not ll_resp.ok:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Long-lived token exchange error: {ll_resp.text[:300]}",
-        )
-    long_lived_user_token = ll_resp.json().get("access_token", "")
+        long_lived_user_token, _ = exchange_long_lived_user_token(short_lived_token)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     managed_pages = _list_managed_pages(long_lived_user_token)
     pages_html = _format_managed_pages_html(
         managed_pages, settings.FACEBOOK_PAGE_ID or ""
     )
 
-    # Step 3: Get a never-expiring Page access token (required for FB + IG analytics/posting).
-    page_token, page_name, page_token_note = _fetch_page_access_token(
+    page_token, page_name, page_token_note = fetch_page_access_token(
         long_lived_user_token,
         settings.FACEBOOK_PAGE_ID,
     )
 
     if page_token:
         token_to_use = page_token
-        token_label = "Page access token (non-expiring — use this)"
+        token_label = "Page access token (non-expiring — saved automatically)"
         token_note = (
             f"Page: <strong>{page_name}</strong>"
             if page_name
@@ -299,52 +241,55 @@ async def meta_auth_callback(
             token_note += f"<br><span style='color:#b45309'>{page_token_note}</span>"
     else:
         token_to_use = long_lived_user_token
-        token_label = "Long-lived USER token (~60 days — not ideal)"
+        token_label = "Long-lived USER token (~60 days — Page token missing)"
         token_note = (
             (page_token_note or "Could not fetch a Page token.")
             + "<br><strong>Set FACEBOOK_PAGE_ID in .env before re-authorizing</strong> "
             "to receive a non-expiring Page token for Facebook and Instagram."
         )
 
-    debug_data = _debug_token_info(token_to_use)
+    ig_id = ""
+    if page_token:
+        ig_id = resolve_instagram_account_id(page_token, settings.FACEBOOK_PAGE_ID)
+
+    saved_keys = persist_meta_tokens(
+        page_token=page_token or "",
+        user_token=long_lived_user_token,
+        instagram_account_id=ig_id,
+    )
+    # If only the user token could be obtained, still persist it for later refresh.
+    if not page_token and long_lived_user_token:
+        saved_keys = persist_meta_tokens(user_token=long_lived_user_token)
+
+    debug_data = debug_token(token_to_use)
     expiry_text = _format_expiry(debug_data)
     token_type = debug_data.get("type", "unknown")
     is_valid = debug_data.get("is_valid", "unknown")
     scopes = ", ".join(debug_data.get("scopes", []) or [])
 
-    # Resolve linked Instagram Business account for .env
     ig_block = ""
-    page_id_for_ig = (settings.FACEBOOK_PAGE_ID or "").strip()
-    if page_id_for_ig and token_to_use:
-        try:
-            graph_url = f"https://graph.facebook.com/{settings.META_GRAPH_API_VERSION}"
-            ig_resp = requests.get(
-                f"{graph_url}/{page_id_for_ig}",
-                params={
-                    "fields": "instagram_business_account{id,username,name}",
-                    "access_token": token_to_use,
-                },
-                timeout=20,
-            )
-            if ig_resp.ok:
-                ig_data = (ig_resp.json().get("instagram_business_account") or {})
-                if isinstance(ig_data, dict) and ig_data.get("id"):
-                    ig_id = ig_data.get("id")
-                    ig_user = ig_data.get("username", "")
-                    ig_name = ig_data.get("name", "")
-                    ig_block = f"""
+    if ig_id:
+        ig_block = f"""
           <h3>Instagram Business Account</h3>
-          <p>@{ig_user} ({ig_name}) — ID: <code>{ig_id}</code></p>
-          <p>Set in <code>backend/.env</code>:</p>
-          <pre style="background:#f4f4f4;padding:1rem;overflow:auto">INSTAGRAM_ACCOUNT_ID={ig_id}</pre>
-                    """
-        except requests.RequestException as exc:
-            logger.warning(f"Instagram account lookup during Meta OAuth: {exc}")
+          <p>Linked account ID <code>{ig_id}</code> was saved automatically.</p>
+        """
+
+    saved_note = (
+        f"<p style='background:#ecfdf5;border:1px solid #6ee7b7;padding:1rem;border-radius:6px'>"
+        f"<strong>Saved automatically:</strong> {', '.join(saved_keys) or 'none'}. "
+        f"No .env paste or backend restart needed. The daily scheduler will keep "
+        f"the user token extended so Facebook &amp; Instagram analytics stay online."
+        f"</p>"
+        if saved_keys
+        else "<p style='color:#b45309'>Tokens were obtained but could not be persisted. "
+        "Check backend logs and database connectivity.</p>"
+    )
 
     return HTMLResponse(
         content=f"""
         <html><body style="font-family:sans-serif;padding:2rem;max-width:720px">
           <h2>Meta (Facebook + Instagram) authorization successful</h2>
+          {saved_note}
           <p>{token_note}</p>
           <p><strong>{token_label}</strong></p>
           <ul>
@@ -353,23 +298,17 @@ async def meta_auth_callback(
             <li>Expires: <strong>{expiry_text}</strong></li>
           </ul>
           {f"<p>Scopes: {scopes}</p>" if scopes else ""}
-          <p>Copy this value into <code>backend/.env</code> as
-          <code>FACEBOOK_PAGE_ACCESS_TOKEN</code>, then restart the backend:</p>
-          <pre style="background:#f4f4f4;padding:1rem;overflow:auto;word-break:break-all">{token_to_use}</pre>
-          <h3>Next steps</h3>
-          <ol>
-            <li>Open <code>backend/.env</code></li>
-            <li>Replace <code>FACEBOOK_PAGE_ACCESS_TOKEN=...</code> with the token above</li>
-            <li>Confirm <code>FACEBOOK_PAGE_ID={settings.FACEBOOK_PAGE_ID or '(set your Page ID)'}</code></li>
-            <li>Set <code>DRAFT_MODE=False</code> for live posting</li>
-            <li>Restart the backend server</li>
-          </ol>
           {ig_block}
           {pages_html}
+          <h3>What happens next</h3>
+          <ol>
+            <li>Open Dashboard → Analytics — Facebook and Instagram should show Connected</li>
+            <li>Check status anytime at <code>/api/v1/auth/meta/status</code></li>
+            <li>The backend refreshes Meta tokens daily in the background</li>
+          </ol>
           <p style="color:#666;font-size:0.9rem">
-            Do <strong>not</strong> use tokens from Graph API Explorer for production — they
-            expire in about 1–2 hours. Always use this <code>/api/v1/auth/meta</code> flow and
-            copy the <strong>Page access token</strong> shown above.
+            Do <strong>not</strong> paste Graph API Explorer tokens — they expire in 1–2 hours.
+            Always use this <code>/api/v1/auth/meta</code> flow.
           </p>
         </body></html>
         """

@@ -136,9 +136,25 @@ export async function fetchWithTimeout(
 ): Promise<Response> {
   const { timeoutMs = API_CONFIG.readTimeout, ...fetchInit } = init ?? {};
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(
+    () => controller.abort(new DOMException(`Request timed out after ${timeoutMs / 1000}s`, 'TimeoutError')),
+    timeoutMs,
+  );
   try {
     return await apiFetch(input, { ...fetchInit, signal: controller.signal });
+  } catch (err) {
+    if (err instanceof DOMException && (err.name === 'AbortError' || err.name === 'TimeoutError')) {
+      throw new Error(
+        err.name === 'TimeoutError' || err.message.includes('timed out')
+          ? `Request timed out after ${timeoutMs / 1000}s — is the backend running?`
+          : 'Request was cancelled',
+      );
+    }
+    // Browsers sometimes surface abort as a plain Error with this message
+    if (err instanceof Error && /signal is aborted/i.test(err.message)) {
+      throw new Error(`Request timed out after ${timeoutMs / 1000}s — is the backend running?`);
+    }
+    throw err;
   } finally {
     clearTimeout(timer);
   }

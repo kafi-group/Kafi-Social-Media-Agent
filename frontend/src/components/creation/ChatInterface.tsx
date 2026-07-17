@@ -274,7 +274,7 @@ export default function ChatInterface() {
     return (
       `Image API not ready on ${backend}. ` +
       'Hard-refresh (Ctrl+Shift+R), confirm Vercel NEXT_PUBLIC_API_URL is ' +
-      'https://kafi-social-media-agent.up.railway.app, then redeploy Vercel.'
+      'https://kafi-social-agent.up.railway.app, then redeploy Vercel.'
     );
   };
 

@@ -1,17 +1,19 @@
 """
 YouTube OAuth 2.0 routes — obtain a refresh token with upload permissions.
 
-Visit http://localhost:8000/api/v1/auth/youtube while the backend is running.
+Live: https://kafi-social-agent.up.railway.app/api/v1/auth/youtube
 """
 
+import hashlib
 from urllib.parse import urlencode
 
 import requests
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from app.config import settings
+from app.config import public_api_url, settings
 from app.services.social_publisher import YouTubeClient
+from app.services.token_store import save_credentials
 from app.utils.logger import logger
 
 router = APIRouter()
@@ -79,10 +81,40 @@ def _oauth_scopes() -> list[str]:
     return [s.strip() for s in settings.YOUTUBE_OAUTH_SCOPES.split(",") if s.strip()]
 
 
+def _clean_oauth_value(value: str) -> str:
+    """Normalize copied env values from Railway / .env without exposing secrets."""
+    clean = (value or "").strip()
+    if len(clean) >= 2 and clean[0] == clean[-1] and clean[0] in ("'", '"'):
+        clean = clean[1:-1].strip()
+    return clean
+
+
+def _youtube_oauth_config() -> tuple[str, str, str]:
+    """Return normalized OAuth values so pasted Railway vars cannot include wrappers."""
+    return (
+        _clean_oauth_value(settings.YOUTUBE_CLIENT_ID),
+        _clean_oauth_value(settings.YOUTUBE_CLIENT_SECRET),
+        _clean_oauth_value(settings.YOUTUBE_REDIRECT_URI),
+    )
+
+
+def _safe_config_fingerprint(value: str) -> dict:
+    """Non-secret diagnostics for confirming which Railway value is loaded."""
+    clean = (value or "").strip()
+    if not clean:
+        return {"set": False, "length": 0, "sha8": None}
+    return {
+        "set": True,
+        "length": len(clean),
+        "sha8": hashlib.sha256(clean.encode("utf-8")).hexdigest()[:8],
+    }
+
+
 def _build_google_auth_url() -> str:
+    client_id, _, redirect_uri = _youtube_oauth_config()
     params = {
-        "client_id": settings.YOUTUBE_CLIENT_ID,
-        "redirect_uri": settings.YOUTUBE_REDIRECT_URI,
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
         "response_type": "code",
         "scope": " ".join(_oauth_scopes()),
         "access_type": "offline",
@@ -100,14 +132,20 @@ async def youtube_auth_status():
     Show which YouTube channel THIS backend instance will upload to.
     Use this to confirm local vs Railway are using different tokens.
     """
+    client_id, client_secret, redirect_uri = _youtube_oauth_config()
     client = YouTubeClient(draft_mode=False)
     configured_id = (settings.YOUTUBE_CHANNEL_ID or "").strip()
-    redirect_uri = settings.YOUTUBE_REDIRECT_URI
+    diagnostics = {
+        "client_id": _safe_config_fingerprint(client_id),
+        "client_secret": _safe_config_fingerprint(client_secret),
+        "redirect_uri": redirect_uri,
+    }
 
     if not client.is_configured:
         return {
             "configured": False,
             "redirect_uri": redirect_uri,
+            "diagnostics": diagnostics,
             "message": "YouTube OAuth credentials missing in this backend's environment.",
         }
 
@@ -118,6 +156,7 @@ async def youtube_auth_status():
             "redirect_uri": redirect_uri,
             "oauth_valid": False,
             "configured_channel_id": configured_id or None,
+            "diagnostics": diagnostics,
             "message": "Refresh token invalid for this backend. Re-authorize.",
         }
 
@@ -131,6 +170,7 @@ async def youtube_auth_status():
         "configured": True,
         "redirect_uri": redirect_uri,
         "oauth_valid": True,
+        "diagnostics": diagnostics,
         "analytics_ok": analytics_ok,
         "analytics_message": analytics_message,
         "upload_target": upload_target,
@@ -154,7 +194,8 @@ async def youtube_auth_start():
     Start YouTube OAuth — shows brand-account instructions, then Google consent.
     After approval, copy the refresh token from the callback page into .env.
     """
-    if not settings.YOUTUBE_CLIENT_ID or not settings.YOUTUBE_CLIENT_SECRET:
+    client_id, client_secret, redirect_uri = _youtube_oauth_config()
+    if not client_id or not client_secret:
         raise HTTPException(
             status_code=400,
             detail="Set YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET in .env first.",
@@ -166,7 +207,7 @@ async def youtube_auth_start():
         <html><body style="font-family:sans-serif;padding:2rem;max-width:720px;line-height:1.5">
           <h2>Connect YouTube for uploads</h2>
           <p>This backend will save tokens for:</p>
-          <pre style="background:#f4f4f4;padding:0.75rem">{settings.YOUTUBE_REDIRECT_URI}</pre>
+          <pre style="background:#f4f4f4;padding:0.75rem">{redirect_uri}</pre>
 
           <div style="background:#fef2f2;border:1px solid #fca5a5;padding:1rem;border-radius:6px;margin:1rem 0">
             <p><strong>Brand accounts (Essence Food vs Kafi Kitchen)</strong></p>
@@ -187,7 +228,7 @@ async def youtube_auth_start():
 
           <p style="color:#666;font-size:0.9rem">
             Already connected? Check
-            <a href="/api/v1/auth/youtube/status">/api/v1/auth/youtube/status</a>
+            <a href="{public_api_url('/api/v1/auth/youtube/status')}">YouTube status</a>
             to see which channel this backend will upload to.
           </p>
         </body></html>
@@ -198,7 +239,8 @@ async def youtube_auth_start():
 @router.get("/auth/youtube/continue")
 async def youtube_auth_continue():
     """Redirect to Google OAuth with account picker enabled."""
-    if not settings.YOUTUBE_CLIENT_ID or not settings.YOUTUBE_CLIENT_SECRET:
+    client_id, client_secret, _ = _youtube_oauth_config()
+    if not client_id or not client_secret:
         raise HTTPException(
             status_code=400,
             detail="Set YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET in .env first.",
@@ -212,14 +254,15 @@ async def youtube_auth_callback(code: str = Query(default="")):
     if not code:
         raise HTTPException(status_code=400, detail="Missing authorization code.")
 
+    client_id, client_secret, redirect_uri = _youtube_oauth_config()
     try:
         response = requests.post(
             GOOGLE_TOKEN_URL,
             data={
                 "code": code,
-                "client_id": settings.YOUTUBE_CLIENT_ID,
-                "client_secret": settings.YOUTUBE_CLIENT_SECRET,
-                "redirect_uri": settings.YOUTUBE_REDIRECT_URI,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uri": redirect_uri,
                 "grant_type": "authorization_code",
             },
             headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -231,9 +274,38 @@ async def youtube_auth_callback(code: str = Query(default="")):
 
     if not response.ok:
         logger.error(f"YouTube OAuth token exchange error: {response.text[:500]}")
-        raise HTTPException(
+        body = response.text[:500]
+        invalid_client = "invalid_client" in body
+        help_html = ""
+        if invalid_client:
+            help_html = f"""
+              <div style="background:#fef2f2;border:1px solid #fca5a5;padding:1rem;border-radius:6px;margin:1rem 0">
+                <p><strong>invalid_client — client secret does not match</strong></p>
+                <ol>
+                  <li>Open <a href="https://console.cloud.google.com/apis/credentials">Google Cloud → Credentials</a></li>
+                  <li>Open the <strong>OAuth 2.0 Client ID</strong> whose Client ID matches
+                      Railway <code>YOUTUBE_CLIENT_ID</code></li>
+                  <li>Click <strong>Reset secret</strong> (or copy the current secret)</li>
+                  <li>Paste the new value into Railway
+                      <code>YOUTUBE_CLIENT_SECRET</code> (no quotes, no spaces)</li>
+                  <li>Under Authorized redirect URIs add exactly:
+                      <pre style="background:#f4f4f4;padding:0.5rem">{redirect_uri}</pre>
+                  </li>
+                  <li>Redeploy Railway, then try
+                      <a href="{public_api_url('/api/v1/auth/youtube')}">YouTube auth</a> again</li>
+                </ol>
+              </div>
+            """
+        return HTMLResponse(
             status_code=400,
-            detail=f"Google OAuth error: {response.text[:300]}",
+            content=f"""
+            <html><body style="font-family:sans-serif;padding:2rem;max-width:720px;line-height:1.5">
+              <h2>YouTube authorization failed</h2>
+              {help_html}
+              <p>Google response:</p>
+              <pre style="background:#f4f4f4;padding:1rem;overflow:auto">{body}</pre>
+            </body></html>
+            """,
         )
 
     data = response.json()
@@ -279,6 +351,8 @@ async def youtube_auth_callback(code: str = Query(default="")):
     channel_block = ""
     wrong_channel_warning = ""
     analytics_probe_block = ""
+    skip_autosave = False
+    channel_id_to_save = ""
     access_token = data.get("access_token", "")
     if access_token:
         probe_ok, probe_message = _probe_youtube_analytics(access_token)
@@ -300,21 +374,23 @@ async def youtube_auth_callback(code: str = Query(default="")):
             custom_url = upload_target.get("custom_url", "")
             title_lower = title.lower()
             if "kafi kitchen" in title_lower or custom_url == "@kafikitchen":
+                skip_autosave = True
                 wrong_channel_warning = """
           <div style="background:#fef2f2;border:2px solid #dc2626;padding:1rem;margin:1rem 0;border-radius:6px">
-            <p><strong>Wrong channel — do not save this token!</strong></p>
+            <p><strong>Wrong channel — token was NOT saved!</strong></p>
             <p>This token uploads to <strong>Kafi Kitchen</strong>. Revoke access, then authorize
             again and select <strong>Essence Food</strong> on Google's account chooser
             (not the Gmail address).</p>
             <p><a href="/api/v1/auth/youtube">Try again</a></p>
           </div>
                 """
+            else:
+                channel_id_to_save = channel_id
             channel_block = f"""
           <h3>Upload target for this token</h3>
           <p><strong>{title}</strong>{f' ({custom_url})' if custom_url else ''}</p>
-          <p>Videos will upload to this channel — verify it is correct before saving the token.</p>
-          <p>Add to <code>backend/.env</code> <strong>and Railway</strong>:</p>
-          <pre style="background:#f4f4f4;padding:1rem;overflow:auto">YOUTUBE_CHANNEL_ID={channel_id}</pre>
+          <p>Videos will upload to this channel.</p>
+          <p>Channel ID: <code>{channel_id}</code></p>
             """
             if len(channels) > 1:
                 others = "".join(
@@ -330,31 +406,56 @@ async def youtube_auth_callback(code: str = Query(default="")):
           </div>
                 """
 
+    saved_keys: list[str] = []
+    if not skip_autosave and refresh_token:
+        payload = {"YOUTUBE_REFRESH_TOKEN": refresh_token}
+        if channel_id_to_save:
+            payload["YOUTUBE_CHANNEL_ID"] = channel_id_to_save
+        saved_keys = save_credentials(payload)
+
+    saved_note = (
+        f"""
+          <p style="background:#ecfdf5;border:1px solid #6ee7b7;padding:1rem;border-radius:6px">
+            <strong>Saved automatically:</strong> {', '.join(saved_keys)}.
+            No .env paste or restart needed — access tokens refresh on every API call.
+          </p>
+          <div style="background:#eff6ff;border:1px solid #93c5fd;padding:1rem;border-radius:6px;margin:1rem 0">
+            <p><strong>Keep YouTube permanent</strong></p>
+            <p>In Google Cloud Console → OAuth consent screen, set the app to
+            <strong>In production</strong> (not Testing). Testing-mode refresh tokens
+            expire after ~7 days and force re-authorization.</p>
+          </div>
+        """
+        if saved_keys
+        else (
+            ""
+            if skip_autosave
+            else "<p style='color:#b45309'>Refresh token obtained but could not be persisted. "
+            "Check backend logs / database.</p>"
+        )
+    )
+
     return HTMLResponse(
         content=f"""
         <html><body style="font-family:sans-serif;padding:2rem;max-width:720px">
           <h2>YouTube authorization successful</h2>
           {wrong_channel_warning}
+          {saved_note}
           {analytics_probe_block}
           <p><strong>{scope_status}</strong></p>
           <p>Callback / redirect URI for this token:</p>
-          <pre style="background:#f4f4f4;padding:1rem;overflow:auto">{settings.YOUTUBE_REDIRECT_URI}</pre>
+          <pre style="background:#f4f4f4;padding:1rem;overflow:auto">{redirect_uri}</pre>
           <p>Granted scopes:</p>
           <pre style="background:#f4f4f4;padding:1rem;overflow:auto">{granted_scopes}</pre>
-          <p>Add this to the <strong>same backend</strong> that handles your posts
-          (<code>backend/.env</code> for local, Railway Variables for production):</p>
-          <pre style="background:#f4f4f4;padding:1rem;overflow:auto;word-break:break-all">YOUTUBE_REFRESH_TOKEN="{refresh_token}"</pre>
           {channel_block}
           <h3>Next steps</h3>
           <ol>
-            <li>Paste the refresh token and channel ID into the environment that serves your dashboard posts</li>
-            <li>If you post from <a href="https://kafi-social-agent.vercel.app">Vercel</a>,
-                update <strong>Railway</strong> — local <code>.env</code> alone is not enough</li>
-            <li>Restart / redeploy the backend</li>
-            <li>Confirm at <code>/api/v1/auth/youtube/status</code> and Dashboard → Settings</li>
+            <li>Confirm at <code>/api/v1/auth/youtube/status</code></li>
+            <li>Open Dashboard → Analytics — YouTube should show Connected</li>
+            <li>Publish the Google OAuth app (leave Testing) so the refresh token never expires</li>
           </ol>
           <p style="color:#666;font-size:0.9rem">
-            Keep this token secret. Do not commit it to git.
+            Tokens are stored in the database and local .env. Do not commit them to git.
           </p>
         </body></html>
         """

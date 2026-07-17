@@ -28,8 +28,11 @@ router = APIRouter()
 def list_rivals(
     active_only: bool = False,
     auto_refresh: bool = Query(
-        True,
-        description="Refresh rivals with missing/stale YouTube snapshots before returning",
+        False,
+        description=(
+            "If true, refresh rivals with missing/stale YouTube snapshots before returning. "
+            "Keep false for fast page loads; use POST /rivals/refresh-all instead."
+        ),
     ),
     db: Session = Depends(get_db),
 ):

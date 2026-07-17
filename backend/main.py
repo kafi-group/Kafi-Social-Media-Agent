@@ -69,6 +69,18 @@ async def lifespan(app: FastAPI):
         )
 
     if settings.APP_MODE == "full":
+        # Load auto-saved OAuth tokens (DB / .oauth_tokens.json) before serving analytics.
+        try:
+            from app.services.token_store import (
+                ensure_credentials_table,
+                load_persisted_credentials,
+            )
+
+            ensure_credentials_table()
+            load_persisted_credentials()
+        except Exception as exc:
+            logger.warning(f"Could not load persisted OAuth credentials: {exc}")
+
         from app.services.scheduler import start_scheduler
         start_scheduler()
     else:

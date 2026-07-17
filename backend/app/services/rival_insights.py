@@ -1,10 +1,14 @@
 """
 Rival insights (Rival Review).
 
-Compares Kafi Commodities' own social performance against the latest rival
-snapshots and asks Gemini (the existing LLMClient) to produce concrete,
-prioritized suggestions on what rivals are doing better and what we should do
-about it. Output is parsed into structured suggestion cards for the UI.
+Compares Kafi Commodities' own LinkedIn performance (static snapshot used by the
+Analytics page) against the latest rival snapshots and asks Gemini to produce
+concrete, prioritized suggestions. Output is parsed into structured suggestion
+cards for the UI.
+
+NOTE: We intentionally do NOT call SocialAnalyticsService here. That path hits
+Facebook/Instagram/YouTube/TikTok live APIs and was causing Get AI Suggestions
+to hang / time out before Gemini ever ran (e.g. expired YouTube OAuth tokens).
 """
 
 from __future__ import annotations
@@ -18,30 +22,38 @@ from sqlalchemy.orm import Session
 
 from app.llm.ollama_client import LLMClient
 from app.services.rival_service import RivalService
-from app.services.social_analytics import SocialAnalyticsService
 from app.utils.exceptions import LLMConnectionError
 from app.utils.logger import logger
 
-
-def _summarize_our_analytics(summary: dict) -> dict:
-    """Reduce the full analytics payload to a compact per-platform snapshot."""
-    platforms = {}
-    for platform in summary.get("platforms", []):
-        if not isinstance(platform, dict):
-            continue
-        totals = platform.get("totals", {}) or {}
-        platforms[platform.get("platform")] = {
-            "status": platform.get("status"),
-            "followers": totals.get("followers") or totals.get("subscribers"),
-            "views": totals.get("views") or totals.get("reach") or totals.get("impressions"),
-            "engagements": totals.get("engagements"),
-            "likes": totals.get("likes"),
-            "comments": totals.get("comments"),
+# Same LinkedIn-only snapshot shown on /dashboard/analytics (static).
+_OUR_LINKEDIN_ANALYTICS = {
+    "totals": {
+        "impressions": 1516,
+        "engagements": 34,
+        "followers": 4794,
+        "members_reached": 664,
+        "profile_viewers": 207,
+        "search_appearances": 4,
+    },
+    "platforms": {
+        "linkedin": {
+            "status": "ok",
+            "followers": 4794,
+            "views": 1516,
+            "impressions": 1516,
+            "engagements": 34,
+            "likes": 30,
+            "comments": 2,
+            "reposts": 0,
+            "saves": 1,
+            "sends": 1,
+            "in_network_pct": 57,
+            "out_of_network_pct": 43,
+            "members_reached": 664,
+            "note": "Static LinkedIn analytics snapshot (not live API).",
         }
-    return {
-        "totals": summary.get("totals", {}),
-        "platforms": platforms,
-    }
+    },
+}
 
 
 def _compact_metrics(metrics: dict) -> dict:
@@ -84,11 +96,11 @@ def _rivals_payload(service: RivalService, rivals) -> list[dict]:
 
 def _build_prompt(our_summary: dict, rivals_payload: list[dict]) -> str:
     return f"""You are a social media strategy analyst for Kafi Commodities, a Pakistani
-spice, rice and chutney exporter that sells internationally. Compare OUR social
-media performance against our RIVALS' latest public analytics, and identify what
+spice, rice and chutney exporter that sells internationally. Compare OUR LinkedIn
+performance against our RIVALS' latest public analytics, and identify what
 rivals are doing better than us and what we should do about it.
 
-OUR ANALYTICS (account-level):
+OUR ANALYTICS (LinkedIn account snapshot):
 {json.dumps(our_summary, indent=2, default=str)}
 
 RIVAL ANALYTICS (public competitor data):
@@ -98,15 +110,15 @@ Return ONLY a JSON array of exactly 5 suggestion objects (no prose, no markdown)
 Keep every string field under 140 characters.
 Each object MUST have exactly these keys:
 - "rival": the rival name the insight is based on (or "Overall" if it spans several)
-- "platform": one of "youtube", "instagram", "website", or "general"
+- "platform": one of "youtube", "instagram", "website", "linkedin", or "general"
 - "observation": what the rival is doing / what the data shows (1 short sentence)
 - "why_better": why this gives them an edge over us (1 short sentence)
 - "recommendation": a concrete action Kafi Commodities should take (1 short sentence)
 - "priority": one of "high", "medium", "low"
 
-Base every insight on the numbers provided. If our data is missing or rivals are
-unavailable, still give practical, category-relevant recommendations. Output the
-JSON array and nothing else."""
+Base every insight on the numbers provided. If rival platform data is missing,
+still give practical, category-relevant recommendations for LinkedIn and social.
+Output the JSON array and nothing else."""
 
 
 def _normalize_suggestion(item: dict) -> dict:
@@ -210,6 +222,7 @@ def generate_insights(
     db: Session, rival_id: Optional[int] = None, days: int = 30
 ) -> dict:
     """Generate rival-vs-us suggestions. Scope to one rival via rival_id."""
+    del days  # kept for API compatibility; our side uses static LinkedIn data
     service = RivalService(db)
 
     if rival_id is not None:
@@ -226,15 +239,20 @@ def generate_insights(
             "message": "No rivals to analyze yet. Add a rival first.",
         }
 
-    our_summary = _summarize_our_analytics(SocialAnalyticsService().get_summary(days=days))
+    our_summary = _OUR_LINKEDIN_ANALYTICS
     rivals_payload = _rivals_payload(service, rivals)
     prompt = _build_prompt(our_summary, rivals_payload)
+
+    logger.info(
+        "Generating rival insights via Gemini (rivals=%d, no live analytics fetch)",
+        len(rivals),
+    )
 
     try:
         raw = LLMClient().generate(
             prompt,
             temperature=0.4,
-            max_output_tokens=4096,
+            max_output_tokens=2048,
             response_mime_type="application/json",
         )
     except LLMConnectionError as exc:

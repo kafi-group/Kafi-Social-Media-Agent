@@ -250,6 +250,10 @@ class Settings(BaseSettings):
     # Maximum request body size in megabytes (enforced by middleware)
     MAX_REQUEST_BODY_MB: int = 20
 
+    # Public backend URL used for OAuth callbacks (Railway production).
+    # Auth links and redirect URIs are derived from this — no localhost needed.
+    BACKEND_PUBLIC_URL: str = "https://kafi-social-agent.up.railway.app"
+
     # Social Media API Settings
     LINKEDIN_ACCESS_TOKEN: str = ""
     LINKEDIN_PERSON_ID: str = ""
@@ -268,25 +272,32 @@ class Settings(BaseSettings):
     LINKEDIN_ORGANIZATION_ACCESS_TOKEN: str = ""
     LINKEDIN_CLIENT_ID: str = ""
     LINKEDIN_CLIENT_SECRET: str = ""
-    LINKEDIN_REDIRECT_URI: str = "http://localhost:8000/api/v1/auth/linkedin/callback"
-    LINKEDIN_OAUTH_SCOPES: str = (
-        # Analytics only — do not add w_organization_social unless LinkedIn approved it
-        # for your app under Marketing Developer Platform.
+    # Empty / localhost values are replaced by BACKEND_PUBLIC_URL on startup.
+    LINKEDIN_REDIRECT_URI: str = ""
+    # Default: Sign In + personal posting. Org analytics needs Marketing Developer
+    # Platform approval for rw_organization_admin — use /auth/linkedin?purpose=analytics.
+    LINKEDIN_OAUTH_SCOPES: str = "openid profile email w_member_social"
+    LINKEDIN_ANALYTICS_OAUTH_SCOPES: str = (
         "openid profile email rw_organization_admin"
     )
     FACEBOOK_APP_ID: str = ""
     FACEBOOK_APP_SECRET: str = ""
     FACEBOOK_PAGE_ID: str = ""
     FACEBOOK_PAGE_ACCESS_TOKEN: str = ""
-    FACEBOOK_REDIRECT_URI: str = "http://localhost:8000/api/v1/auth/meta/callback"
+    # Long-lived user token (~60 days). Auto-refreshed by the scheduler so the
+    # Page token can always be re-derived without manual Meta re-auth.
+    FACEBOOK_USER_ACCESS_TOKEN: str = ""
+    FACEBOOK_REDIRECT_URI: str = ""
     INSTAGRAM_ACCOUNT_ID: str = ""
     META_GRAPH_API_VERSION: str = "v21.0"
+    # How often to extend Meta long-lived tokens (seconds). Default: daily.
+    META_TOKEN_REFRESH_INTERVAL_SECONDS: int = 86400
 
     # YouTube Settings (YouTube Data API v3 - OAuth 2.0)
     YOUTUBE_CLIENT_ID: str = ""
     YOUTUBE_CLIENT_SECRET: str = ""
     YOUTUBE_REFRESH_TOKEN: str = ""
-    YOUTUBE_REDIRECT_URI: str = "http://localhost:8000/api/v1/auth/youtube/callback"
+    YOUTUBE_REDIRECT_URI: str = ""
     YOUTUBE_CHANNEL_ID: str = ""
     YOUTUBE_VIDEO_CATEGORY_ID: str = "22"  # 22 = People & Blogs (default)
     # YouTube upload visibility: private | unlisted | public
@@ -320,8 +331,54 @@ class Settings(BaseSettings):
         extra = "ignore"  # Ignore unknown env vars so .env can have extra vars
 
 
+def _is_local_url(url: str) -> bool:
+    lowered = (url or "").strip().lower()
+    return (
+        not lowered
+        or "localhost" in lowered
+        or "127.0.0.1" in lowered
+        or lowered.startswith("http://0.0.0.0")
+    )
+
+
+def _bootstrap_public_oauth_urls(settings: "Settings") -> None:
+    """
+    Point OAuth callbacks at the live Railway backend by default.
+    Explicit non-localhost redirect URIs in the environment are kept as-is.
+    """
+    base = (settings.BACKEND_PUBLIC_URL or "").strip().rstrip("/")
+    if not base:
+        return
+
+    # Prefer the known live hostname if an old/mistyped Railway URL is stored.
+    if "kafi-social-media-agent.up.railway.app" in base:
+        base = "https://kafi-social-agent.up.railway.app"
+        settings.BACKEND_PUBLIC_URL = base
+
+    derived = {
+        "FACEBOOK_REDIRECT_URI": f"{base}/api/v1/auth/meta/callback",
+        "YOUTUBE_REDIRECT_URI": f"{base}/api/v1/auth/youtube/callback",
+        "LINKEDIN_REDIRECT_URI": f"{base}/api/v1/auth/linkedin/callback",
+    }
+    for key, url in derived.items():
+        current = (getattr(settings, key, "") or "").strip()
+        if _is_local_url(current) or "kafi-social-media-agent.up.railway.app" in current:
+            setattr(settings, key, url)
+
+
 settings = Settings()
 _bootstrap_internal_api_key(settings)
+_bootstrap_public_oauth_urls(settings)
+
+
+def public_api_url(path: str = "") -> str:
+    """Build an absolute URL on the live backend (Railway)."""
+    base = (settings.BACKEND_PUBLIC_URL or "").strip().rstrip("/")
+    if not path:
+        return base
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"{base}{path}"
 
 
 def _parse_csv(value: str) -> list[str]:

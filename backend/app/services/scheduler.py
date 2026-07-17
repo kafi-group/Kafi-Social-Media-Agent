@@ -180,6 +180,21 @@ def refresh_rivals_job() -> None:
         db.close()
 
 
+def refresh_meta_tokens_job() -> None:
+    """Extend Meta long-lived user token and re-derive the Page token."""
+    from app.services.meta_token_service import refresh_meta_tokens
+
+    try:
+        result = refresh_meta_tokens(force=False)
+        status = result.get("status", "unknown")
+        if status in ("refreshed", "ok", "skipped"):
+            logger.info(f"Meta token maintenance: {status} — {result.get('reason', '')}")
+        else:
+            logger.warning(f"Meta token maintenance: {status} — {result}")
+    except Exception as e:
+        logger.error(f"Meta token maintenance failed: {e}")
+
+
 def publish_due_events() -> None:
     """One scheduler tick: find and publish all events that are due."""
     db = SessionLocal()
@@ -248,6 +263,19 @@ def start_scheduler() -> None:
             replace_existing=True,
         )
         logger.info(f"Rival auto-refresh enabled (every {rival_interval}s)")
+
+    # Keep Facebook / Instagram Page tokens renewable without manual re-auth.
+    meta_interval = max(3600, int(settings.META_TOKEN_REFRESH_INTERVAL_SECONDS or 86400))
+    _scheduler.add_job(
+        refresh_meta_tokens_job,
+        trigger="interval",
+        seconds=meta_interval,
+        id="refresh_meta_tokens",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+    logger.info(f"Meta token auto-refresh enabled (every {meta_interval}s)")
 
     _scheduler.start()
     logger.info(f"Post scheduler started (polling every {interval}s)")

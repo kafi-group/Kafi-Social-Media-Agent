@@ -22,16 +22,25 @@ ORG_ANALYTICS_SCOPES = frozenset(
 )
 
 
-def oauth_scopes() -> list[str]:
+def _parse_scopes(raw: str) -> list[str]:
+    return [s.strip() for s in raw.replace(",", " ").split() if s.strip()]
+
+
+def oauth_scopes(purpose: str = "posting") -> list[str]:
+    """
+    purpose=posting   → openid/profile/email/w_member_social (no MDP approval needed)
+    purpose=analytics → includes rw_organization_admin (requires Marketing Developer Platform)
+    """
+    if (purpose or "").strip().lower() == "analytics":
+        raw = (settings.LINKEDIN_ANALYTICS_OAUTH_SCOPES or "").strip()
+        if raw:
+            return _parse_scopes(raw)
+        return ["openid", "profile", "email", "rw_organization_admin"]
+
     raw = (settings.LINKEDIN_OAUTH_SCOPES or "").strip()
     if raw:
-        return [s.strip() for s in raw.replace(",", " ").split() if s.strip()]
-    return [
-        "openid",
-        "profile",
-        "email",
-        "rw_organization_admin",
-    ]
+        return _parse_scopes(raw)
+    return ["openid", "profile", "email", "w_member_social"]
 
 
 def introspect_token(access_token: str) -> dict:

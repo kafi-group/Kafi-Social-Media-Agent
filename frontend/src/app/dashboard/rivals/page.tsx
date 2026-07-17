@@ -111,17 +111,27 @@ export default function RivalReviewPage() {
 
   const [trendRival, setTrendRival] = useState<Rival | null>(null);
 
-  const loadRivals = useCallback(async () => {
+  const loadRivals = useCallback(async (opts?: { silent?: boolean }) => {
+    const silent = opts?.silent ?? false;
     try {
-      setIsLoading(true);
-      setError(null);
-      const res = await fetchWithTimeout(API_ENDPOINTS.RIVALS, { timeoutMs: 120000 });
+      if (!silent) {
+        setIsLoading(true);
+        setError(null);
+      }
+      // Skip server-side auto-refresh so the list returns immediately.
+      // Use Refresh / Refresh all to pull YouTube / IG / website stats.
+      const res = await fetchWithTimeout(`${API_ENDPOINTS.RIVALS}?auto_refresh=false`, {
+        timeoutMs: 30000,
+      });
       if (!res.ok) throw new Error(`Failed to load rivals (${res.status})`);
       setRivals((await res.json()) as Rival[]);
+      if (silent) setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load rivals');
+      if (!silent) {
+        setError(err instanceof Error ? err.message : 'Failed to load rivals');
+      }
     } finally {
-      setIsLoading(false);
+      if (!silent) setIsLoading(false);
     }
   }, []);
 
@@ -157,7 +167,7 @@ export default function RivalReviewPage() {
     try {
       const res = await apiFetch(API_ENDPOINTS.RIVALS_REFRESH_ALL, { method: 'POST' });
       if (!res.ok) throw new Error(`Refresh failed (${res.status})`);
-      await loadRivals();
+      await loadRivals({ silent: true });
       toast.success('All rivals refreshed', { id: pending });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Refresh failed', { id: pending });
@@ -170,7 +180,10 @@ export default function RivalReviewPage() {
     setInsightsLoading(true);
     const pending = toast.loading('Analyzing rivals with AI...');
     try {
-      const res = await apiFetch(API_ENDPOINTS.RIVALS_INSIGHTS);
+      // Gemini can take ~30–90s; give headroom but fail with a clear message.
+      const res = await fetchWithTimeout(API_ENDPOINTS.RIVALS_INSIGHTS, {
+        timeoutMs: 120000,
+      });
       if (!res.ok) throw new Error(`Insights failed (${res.status})`);
       const data = (await res.json()) as RivalInsightsResponse;
       setInsights(data);
@@ -300,8 +313,7 @@ export default function RivalReviewPage() {
       {isLoading ? (
         <div className="rounded-xl border border-gray-200 bg-white p-10 text-center text-gray-500 shadow-sm dark:border-slate-600 dark:bg-slate-800">
           <span className="inline-block w-6 h-6 border-2 border-brand-500 border-t-transparent rounded-full animate-spin mb-3" />
-          <p>Loading rivals and fetching YouTube stats…</p>
-          <p className="mt-1 text-xs text-gray-400">First load can take 20–30 seconds while channels refresh.</p>
+          <p>Loading rivals…</p>
         </div>
       ) : rivals.length === 0 ? (
         <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-10 text-center text-gray-600">

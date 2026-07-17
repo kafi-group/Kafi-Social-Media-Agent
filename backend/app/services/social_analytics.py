@@ -1,7 +1,7 @@
 """
 Social media analytics service.
 
-Fetches account-level analytics from Facebook, Instagram, YouTube, and TikTok
+Fetches account-level analytics from Facebook, Instagram, and YouTube
 and normalizes them into one response shape for the dashboard.
 """
 
@@ -29,7 +29,7 @@ class SocialAnalyticsService:
 
     def get_summary(self, days: int = 30) -> dict:
         """Fetch analytics for all platforms."""
-        platforms = ["facebook", "instagram", "youtube", "tiktok"]
+        platforms = ["facebook", "instagram", "youtube"]
         with ThreadPoolExecutor(max_workers=len(platforms)) as pool:
             results = list(pool.map(lambda p: self.get_platform(p, days), platforms))
 
@@ -66,7 +66,6 @@ class SocialAnalyticsService:
             "facebook": self._facebook_analytics,
             "instagram": self._instagram_analytics,
             "youtube": self._youtube_analytics,
-            "tiktok": self._tiktok_analytics,
         }
 
         if platform not in fetchers:
@@ -136,17 +135,33 @@ class SocialAnalyticsService:
 
         expired = self._meta_token_expired_error(insights_response)
         if expired:
-            return self._response(
-                platform="facebook",
-                days=days,
-                status="token_expired",
-                message=(
-                    "Facebook Page access token has expired. "
-                    "Visit http://localhost:8000/api/v1/auth/meta to re-authorize "
-                    "and get a new long-lived token, then update "
-                    "FACEBOOK_PAGE_ACCESS_TOKEN in .env and restart the backend."
-                ),
-            )
+            repaired = self._repair_meta_token()
+            if repaired:
+                access_token = settings.FACEBOOK_PAGE_ACCESS_TOKEN.strip()
+                insights_response = requests.get(
+                    f"{graph_url}/{page_id}/insights",
+                    params={
+                        "metric": core_metrics,
+                        "period": "day",
+                        "since": start.isoformat(),
+                        "until": end.isoformat(),
+                        "access_token": access_token,
+                    },
+                    timeout=self.REQUEST_TIMEOUT,
+                )
+                expired = self._meta_token_expired_error(insights_response)
+            if expired:
+                return self._response(
+                    platform="facebook",
+                    days=days,
+                    status="token_expired",
+                    message=(
+                        "Facebook Page access token is invalid. "
+                        "Visit the Railway Meta auth URL once "
+                        "(…/api/v1/auth/meta) — tokens are saved automatically "
+                        "and renewed daily afterward."
+                    ),
+                )
 
         error = self._platform_error("facebook", insights_response, days)
         if error:
@@ -271,17 +286,34 @@ class SocialAnalyticsService:
 
         expired = self._meta_token_expired_error(insights_response)
         if expired:
-            return self._response(
-                platform="instagram",
-                days=days,
-                status="token_expired",
-                message=(
-                    "Facebook/Instagram access token has expired. "
-                    "Visit http://localhost:8000/api/v1/auth/meta to re-authorize "
-                    "and get a new long-lived token, then update "
-                    "FACEBOOK_PAGE_ACCESS_TOKEN in .env and restart the backend."
-                ),
-            )
+            repaired = self._repair_meta_token()
+            if repaired:
+                access_token = settings.FACEBOOK_PAGE_ACCESS_TOKEN.strip()
+                insights_response = requests.get(
+                    f"{graph_url}/{account_id}/insights",
+                    params={
+                        "metric": "reach,views,total_interactions,likes,comments,shares",
+                        "period": "day",
+                        "metric_type": "total_value",
+                        "since": start.isoformat(),
+                        "until": end.isoformat(),
+                        "access_token": access_token,
+                    },
+                    timeout=self.REQUEST_TIMEOUT,
+                )
+                expired = self._meta_token_expired_error(insights_response)
+            if expired:
+                return self._response(
+                    platform="instagram",
+                    days=days,
+                    status="token_expired",
+                    message=(
+                        "Instagram access token is invalid. "
+                        "Visit the Railway Meta auth URL once "
+                        "(…/api/v1/auth/meta) — tokens are saved automatically "
+                        "and renewed daily afterward."
+                    ),
+                )
 
         error = self._platform_error("instagram", insights_response, days)
         if error:
@@ -349,9 +381,9 @@ class SocialAnalyticsService:
             if refresh_error == "expired_or_revoked":
                 message = (
                     "YouTube refresh token expired or was revoked. "
-                    "Visit http://localhost:8000/api/v1/auth/youtube to reconnect, "
-                    "copy the new YOUTUBE_REFRESH_TOKEN into backend/.env, "
-                    "then restart the backend."
+                    "Reconnect on Railway at …/api/v1/auth/youtube — the new token "
+                    "is saved automatically. Then publish the Google OAuth consent "
+                    "screen (In production) so Testing-mode 7-day expiry stops."
                 )
                 status = "token_expired"
             elif refresh_error == "invalid_credentials":
@@ -363,9 +395,8 @@ class SocialAnalyticsService:
                 status = "permission_error"
             else:
                 message = (
-                    "Could not refresh YouTube token. Reconnect at "
-                    "http://localhost:8000/api/v1/auth/youtube and ensure "
-                    "yt-analytics.readonly is granted."
+                    "Could not refresh YouTube token. Reconnect on Railway at "
+                    "…/api/v1/auth/youtube and ensure yt-analytics.readonly is granted."
                 )
                 status = "permission_error"
             return self._response(
@@ -444,17 +475,15 @@ class SocialAnalyticsService:
             message="YouTube channel analytics fetched successfully.",
         )
 
-    def _tiktok_analytics(self, days: int) -> dict:
-        """Placeholder until TikTok API credentials are configured."""
-        return self._response(
-            platform="tiktok",
-            days=days,
-            status="not_configured",
-            message=(
-                "TikTok analytics is not connected yet. "
-                "TikTok API credentials will be added in a future update."
-            ),
-        )
+    def _repair_meta_token(self) -> bool:
+        """Try to auto-refresh Meta tokens when analytics hits an expiry error."""
+        try:
+            from app.services.meta_token_service import ensure_valid_page_token
+
+            return ensure_valid_page_token()
+        except Exception as exc:
+            logger.warning(f"Meta token auto-repair failed: {exc}")
+            return False
 
     def _youtube_access_token(self) -> tuple[Optional[str], str]:
         """Refresh YouTube access token. Returns (token, error_code)."""

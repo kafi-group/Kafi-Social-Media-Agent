@@ -157,9 +157,14 @@ export interface AnalyticsOverview {
   qa_pass_rate: number;
 }
 
-export type AnalyticsPlatform = 'facebook' | 'instagram' | 'youtube' | 'tiktok';
+export type AnalyticsPlatform = 'facebook' | 'instagram' | 'youtube' | 'linkedin';
 
-export type AnalyticsStatus = 'ok' | 'not_configured' | 'permission_error' | 'api_error';
+export type AnalyticsStatus =
+  | 'ok'
+  | 'not_configured'
+  | 'permission_error'
+  | 'api_error'
+  | 'token_expired';
 
 export interface AnalyticsRange {
   start: string;
