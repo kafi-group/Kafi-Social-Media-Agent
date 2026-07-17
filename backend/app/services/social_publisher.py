@@ -1019,10 +1019,16 @@ class YouTubeClient:
     VIDEO_API_URL = "https://www.googleapis.com/youtube/v3/videos"
 
     def __init__(self, draft_mode: bool = False):
-        self.client_id = settings.YOUTUBE_CLIENT_ID or ""
-        self.client_secret = settings.YOUTUBE_CLIENT_SECRET or ""
-        self.refresh_token = settings.YOUTUBE_REFRESH_TOKEN or ""
-        self.channel_id = settings.YOUTUBE_CHANNEL_ID or ""
+        def _clean(value: str) -> str:
+            clean = (value or "").strip()
+            if len(clean) >= 2 and clean[0] == clean[-1] and clean[0] in ("'", '"'):
+                clean = clean[1:-1].strip()
+            return clean
+
+        self.client_id = _clean(settings.YOUTUBE_CLIENT_ID or "")
+        self.client_secret = _clean(settings.YOUTUBE_CLIENT_SECRET or "")
+        self.refresh_token = _clean(settings.YOUTUBE_REFRESH_TOKEN or "")
+        self.channel_id = _clean(settings.YOUTUBE_CHANNEL_ID or "")
         self.category_id = settings.YOUTUBE_VIDEO_CATEGORY_ID or "22"
         self.draft_mode = draft_mode
         self._access_token: Optional[str] = None

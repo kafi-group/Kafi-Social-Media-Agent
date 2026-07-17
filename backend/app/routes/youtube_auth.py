@@ -100,13 +100,87 @@ def _youtube_oauth_config() -> tuple[str, str, str]:
 
 def _safe_config_fingerprint(value: str) -> dict:
     """Non-secret diagnostics for confirming which Railway value is loaded."""
-    clean = (value or "").strip()
+    clean = _clean_oauth_value(value)
     if not clean:
-        return {"set": False, "length": 0, "sha8": None}
+        return {"set": False, "length": 0, "sha8": None, "prefix": None}
     return {
         "set": True,
         "length": len(clean),
         "sha8": hashlib.sha256(clean.encode("utf-8")).hexdigest()[:8],
+        # Safe to show — Google Client IDs are public in the browser OAuth URL anyway.
+        "prefix": clean[:12] if "@" not in clean and "GOCSPX" not in clean else clean[:7],
+    }
+
+
+def _probe_client_credentials(client_id: str, client_secret: str) -> dict:
+    """
+    Ask Google whether this client_id + client_secret pair is accepted.
+
+    Uses a fake refresh_token on purpose:
+      - invalid_grant  => credentials are VALID (secret matches this Client ID)
+      - invalid_client => credentials are INVALID (wrong secret / wrong client)
+    """
+    if not client_id or not client_secret:
+        return {
+            "ok": False,
+            "verdict": "missing",
+            "google_error": None,
+            "message": "YOUTUBE_CLIENT_ID or YOUTUBE_CLIENT_SECRET is empty on this backend.",
+        }
+    try:
+        response = requests.post(
+            GOOGLE_TOKEN_URL,
+            data={
+                "grant_type": "refresh_token",
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "refresh_token": "credential-probe-not-a-real-token",
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=20,
+        )
+    except requests.RequestException as exc:
+        return {
+            "ok": False,
+            "verdict": "network_error",
+            "google_error": None,
+            "message": f"Could not reach Google token endpoint: {exc}",
+        }
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    error = str(payload.get("error") or "")
+    description = str(payload.get("error_description") or "")
+
+    if error == "invalid_grant":
+        return {
+            "ok": True,
+            "verdict": "client_credentials_valid",
+            "google_error": error,
+            "message": (
+                "Google accepted this Client ID + Client Secret pair. "
+                "Your refresh token is the problem — re-authorize at /api/v1/auth/youtube."
+            ),
+        }
+    if error == "invalid_client":
+        return {
+            "ok": False,
+            "verdict": "client_credentials_invalid",
+            "google_error": error,
+            "message": (
+                "Google rejected this Client ID + Client Secret pair. "
+                "Even if Railway 'looks' correct, the secret does not belong to this Client ID "
+                "(wrong Google Cloud project/client, or an old secret after Reset). "
+                f"Detail: {description or 'invalid_client'}"
+            ),
+        }
+    return {
+        "ok": False,
+        "verdict": "unexpected",
+        "google_error": error or f"http_{response.status_code}",
+        "message": description or response.text[:200],
     }
 
 
@@ -135,18 +209,44 @@ async def youtube_auth_status():
     client_id, client_secret, redirect_uri = _youtube_oauth_config()
     client = YouTubeClient(draft_mode=False)
     configured_id = (settings.YOUTUBE_CHANNEL_ID or "").strip()
+    credential_probe = _probe_client_credentials(client_id, client_secret)
     diagnostics = {
         "client_id": _safe_config_fingerprint(client_id),
         "client_secret": _safe_config_fingerprint(client_secret),
         "redirect_uri": redirect_uri,
+        "credential_probe": credential_probe,
     }
 
-    if not client.is_configured:
+    if not client_id or not client_secret:
         return {
             "configured": False,
             "redirect_uri": redirect_uri,
             "diagnostics": diagnostics,
             "message": "YouTube OAuth credentials missing in this backend's environment.",
+        }
+
+    if not credential_probe.get("ok"):
+        return {
+            "configured": True,
+            "redirect_uri": redirect_uri,
+            "oauth_valid": False,
+            "configured_channel_id": configured_id or None,
+            "diagnostics": diagnostics,
+            "message": credential_probe.get("message")
+            or "Google rejected YOUTUBE_CLIENT_ID / YOUTUBE_CLIENT_SECRET.",
+        }
+
+    if not client.is_configured:
+        return {
+            "configured": True,
+            "redirect_uri": redirect_uri,
+            "oauth_valid": False,
+            "configured_channel_id": configured_id or None,
+            "diagnostics": diagnostics,
+            "message": (
+                "Client ID + Secret are valid, but YOUTUBE_REFRESH_TOKEN is missing. "
+                "Authorize at /api/v1/auth/youtube."
+            ),
         }
 
     token = client._refresh_access_token()
@@ -157,7 +257,10 @@ async def youtube_auth_status():
             "oauth_valid": False,
             "configured_channel_id": configured_id or None,
             "diagnostics": diagnostics,
-            "message": "Refresh token invalid for this backend. Re-authorize.",
+            "message": (
+                "Client ID + Secret are valid, but the refresh token is invalid/expired. "
+                "Re-authorize at /api/v1/auth/youtube."
+            ),
         }
 
     channels = _list_oauth_channels(token)
@@ -278,21 +381,43 @@ async def youtube_auth_callback(code: str = Query(default="")):
         invalid_client = "invalid_client" in body
         help_html = ""
         if invalid_client:
+            id_fp = _safe_config_fingerprint(client_id)
+            secret_fp = _safe_config_fingerprint(client_secret)
+            probe = _probe_client_credentials(client_id, client_secret)
             help_html = f"""
               <div style="background:#fef2f2;border:1px solid #fca5a5;padding:1rem;border-radius:6px;margin:1rem 0">
-                <p><strong>invalid_client — client secret does not match</strong></p>
+                <p><strong>invalid_client — Google rejected this Client ID + Secret pair</strong></p>
+                <p>Matching values “by eye” in Railway is not enough. Google only accepts the
+                secret that belongs to <em>this exact</em> OAuth client. After you click
+                <strong>Reset secret</strong>, the old secret stops working forever.</p>
+                <p>What THIS backend just used (no secret shown):</p>
+                <ul>
+                  <li>Client ID prefix: <code>{id_fp.get("prefix")}</code>
+                      length={id_fp.get("length")} sha8=<code>{id_fp.get("sha8")}</code></li>
+                  <li>Client secret length={secret_fp.get("length")}
+                      sha8=<code>{secret_fp.get("sha8")}</code>
+                      (must start with <code>GOCSPX-</code>)</li>
+                  <li>Credential probe: <code>{probe.get("verdict")}</code>
+                      — {probe.get("message")}</li>
+                </ul>
                 <ol>
-                  <li>Open <a href="https://console.cloud.google.com/apis/credentials">Google Cloud → Credentials</a></li>
-                  <li>Open the <strong>OAuth 2.0 Client ID</strong> whose Client ID matches
-                      Railway <code>YOUTUBE_CLIENT_ID</code></li>
-                  <li>Click <strong>Reset secret</strong> (or copy the current secret)</li>
-                  <li>Paste the new value into Railway
-                      <code>YOUTUBE_CLIENT_SECRET</code> (no quotes, no spaces)</li>
-                  <li>Under Authorized redirect URIs add exactly:
+                  <li>Open <a href="https://console.cloud.google.com/apis/credentials">Google Cloud → Credentials</a>
+                      in the <strong>same project</strong> that owns Client ID
+                      <code>{id_fp.get("prefix")}…</code></li>
+                  <li>Open that <strong>Web application</strong> OAuth client (not Desktop / not an API key)</li>
+                  <li>Click <strong>Add secret</strong> / <strong>Reset secret</strong> and copy the
+                      <em>new</em> value immediately (Google will not show it again)</li>
+                  <li>In Railway → Variables, replace <code>YOUTUBE_CLIENT_SECRET</code> with that
+                      exact value — no quotes, no spaces, no trailing newline</li>
+                  <li>Confirm <code>YOUTUBE_CLIENT_ID</code> is the full ID ending in
+                      <code>.apps.googleusercontent.com</code> for that same client</li>
+                  <li>Authorized redirect URI must be exactly:
                       <pre style="background:#f4f4f4;padding:0.5rem">{redirect_uri}</pre>
                   </li>
-                  <li>Redeploy Railway, then try
-                      <a href="{public_api_url('/api/v1/auth/youtube')}">YouTube auth</a> again</li>
+                  <li>Redeploy Railway, then open
+                      <a href="{public_api_url('/api/v1/auth/youtube/status')}">/auth/youtube/status</a>
+                      and check <code>diagnostics.credential_probe.verdict</code> is
+                      <code>client_credentials_valid</code> before trying auth again</li>
                 </ol>
               </div>
             """
