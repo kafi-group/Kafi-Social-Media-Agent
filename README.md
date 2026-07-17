@@ -4,7 +4,7 @@ An end-to-end, in-house social media operations platform built for Kafi Commodit
 
 ## 🔗 Live Links & Repository
 
-* **Live Dashboard (Frontend):** [Kafi Social Agent on Vercel](https://kafi-social-agent.vercel.app)
+* **Live Dashboard (Frontend):** [Kafi Social Agent on Vercel](https://kafi-social-media-agent.vercel.app/)
 * **GitHub Repository:** [izoo2003/Social-Media-Agent-With-Engagement-Rival-Analysis-](https://github.com/izoo2003/Social-Media-Agent-With-Engagement-Rival-Analysis-)
 * **Backend API:** Deployed via Railway (FastAPI)
 
