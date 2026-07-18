@@ -341,6 +341,8 @@ export interface RivalPlatformConfig {
   auth_mode?: string | null;
   api_key_set?: boolean;
   oauth_set?: boolean;
+  credentials_present?: boolean;
+  reconnect_path?: string | null;
 }
 
 export interface RivalsConfigResponse {

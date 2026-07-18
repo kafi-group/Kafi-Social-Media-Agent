@@ -50,7 +50,7 @@ _OUR_LINKEDIN_ANALYTICS = {
             "in_network_pct": 57,
             "out_of_network_pct": 43,
             "members_reached": 664,
-            "note": "Static LinkedIn analytics snapshot (not live API).",
+            "note": "Configured LinkedIn analytics.",
         }
     },
 }
@@ -66,6 +66,10 @@ def _compact_metrics(metrics: dict) -> dict:
         "views",
         "total_views",
         "engagements",
+        "recent_avg_engagement",
+        "recent_avg_views",
+        "media_count",
+        "video_count",
         "likes",
         "comments",
         "posts",

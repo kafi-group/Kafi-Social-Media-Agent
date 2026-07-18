@@ -1,11 +1,11 @@
 'use client';
 
-import React, { FormEvent, useState } from 'react';
+import React, { FormEvent, useEffect, useState } from 'react';
 import Image from 'next/image';
 import { useRouter } from 'next/navigation';
 import { Eye, EyeOff } from 'lucide-react';
 import { API_ENDPOINTS } from '@/lib/api-client';
-import { setSession } from '@/lib/auth';
+import { clearSession, setSession } from '@/lib/auth';
 import {
   getDefaultDashboardPath,
   isDashboardPathAllowed,
@@ -20,6 +20,11 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+
+  // Drop any leftover forgeable session cookies before showing the form.
+  useEffect(() => {
+    clearSession();
+  }, []);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -41,6 +46,11 @@ export default function LoginPage() {
             ? data.detail
             : 'Login failed. Check your username and password.',
         );
+        return;
+      }
+
+      if (typeof data.access_token !== 'string' || !data.access_token.includes('.')) {
+        setError('Login response was missing a valid access token.');
         return;
       }
 

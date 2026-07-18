@@ -67,10 +67,8 @@ async def create_rival(
 def get_rivals_config():
     """Public integration status for the Rival Review collectors (no secrets)."""
     youtube_mode = rival_collectors.youtube_auth_mode()
-    instagram_ready = bool(
-        settings.INSTAGRAM_ACCOUNT_ID.strip()
-        and settings.FACEBOOK_PAGE_ACCESS_TOKEN.strip()
-    )
+    # Live probe so a present-but-broken page token is not shown as Ready.
+    ig_probe = rival_collectors.probe_instagram_auth()
     return {
         "youtube": {
             "configured": youtube_mode is not None,
@@ -89,12 +87,11 @@ def get_rivals_config():
             ),
         },
         "instagram": {
-            "configured": instagram_ready,
-            "hint": (
-                "Ready — uses INSTAGRAM_ACCOUNT_ID + FACEBOOK_PAGE_ACCESS_TOKEN."
-                if instagram_ready
-                else "Set INSTAGRAM_ACCOUNT_ID and FACEBOOK_PAGE_ACCESS_TOKEN in backend .env."
-            ),
+            "configured": bool(ig_probe.get("ok")),
+            "credentials_present": bool(ig_probe.get("configured")),
+            "hint": ig_probe.get("message")
+            or "Set INSTAGRAM_ACCOUNT_ID and FACEBOOK_PAGE_ACCESS_TOKEN in backend .env.",
+            "reconnect_path": "/api/v1/auth/meta",
         },
         "website": {
             "configured": True,

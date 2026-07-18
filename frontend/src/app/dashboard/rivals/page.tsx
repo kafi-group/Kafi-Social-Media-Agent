@@ -388,7 +388,7 @@ function RivalsConfigPanel({ config }: { config: RivalsConfigResponse }) {
                     : 'bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-300'
                 }`}
               >
-                {data.configured ? 'Ready' : 'Not configured'}
+                {data.configured ? 'Ready' : 'Not ready'}
               </span>
             </div>
             <p className="mt-2 text-xs text-gray-600 dark:text-slate-400">{data.hint}</p>
@@ -396,6 +396,16 @@ function RivalsConfigPanel({ config }: { config: RivalsConfigResponse }) {
               <p className="mt-1 text-[11px] text-gray-500 dark:text-slate-500">
                 Using YouTube OAuth (upload credentials) because <code>YOUTUBE_DATA_API_KEY</code> is empty.
               </p>
+            )}
+            {key === 'instagram' && !data.configured && (
+              <a
+                href={API_ENDPOINTS.META_AUTH}
+                target="_blank"
+                rel="noreferrer"
+                className="mt-2 inline-flex text-xs font-semibold text-pink-700 underline underline-offset-2 hover:text-pink-800 dark:text-pink-300"
+              >
+                Reconnect Meta (Facebook / Instagram)
+              </a>
             )}
           </div>
         ))}
@@ -461,10 +471,11 @@ function RivalCard({
           value={formatNumber(yt?.metrics?.total_views as number)}
           hint={yt?.status !== 'ok' ? yt?.message : undefined}
         />
-        <Metric label="IG followers" value={formatNumber(ig?.metrics?.followers as number)} />
+        <Metric label="IG followers" value={formatNumber(ig?.metrics?.followers as number)} hint={ig?.status !== 'ok' ? ig?.message : undefined} />
         <Metric
           label="IG avg engagement"
           value={formatNumber(ig?.metrics?.recent_avg_engagement as number)}
+          hint={ig?.status !== 'ok' ? ig?.message : undefined}
         />
       </div>
 

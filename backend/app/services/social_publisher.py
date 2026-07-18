@@ -605,12 +605,14 @@ class LinkedInClient:
 class FacebookClient:
     """Facebook Graph API client for posting to Facebook Pages."""
 
-    GRAPH_API_URL = "https://graph.facebook.com/v18.0"
-
     def __init__(self, draft_mode: bool = False):
         self.page_id = settings.FACEBOOK_PAGE_ID or ""
         self.page_access_token = settings.FACEBOOK_PAGE_ACCESS_TOKEN or ""
         self.draft_mode = draft_mode
+
+    def _graph_api_url(self) -> str:
+        version = (settings.META_GRAPH_API_VERSION or "v21.0").strip() or "v21.0"
+        return f"https://graph.facebook.com/{version}"
 
     @property
     def is_configured(self) -> bool:
@@ -667,7 +669,7 @@ class FacebookClient:
                         "access_token": self.page_access_token,
                     }
                     response = requests.post(
-                        f"{self.GRAPH_API_URL}/{self.page_id}/photos",
+                        f"{self._graph_api_url()}/{self.page_id}/photos",
                         data=data,
                         files=files,
                         timeout=180,
@@ -681,7 +683,7 @@ class FacebookClient:
                         "access_token": self.page_access_token,
                     }
                     response = requests.post(
-                        f"{self.GRAPH_API_URL}/{self.page_id}/videos",
+                        f"{self._graph_api_url()}/{self.page_id}/videos",
                         data=data,
                         files=files,
                         timeout=300,
@@ -690,7 +692,7 @@ class FacebookClient:
                 # Text-only post
                 params["message"] = message
                 response = requests.post(
-                    f"{self.GRAPH_API_URL}/{self.page_id}/feed",
+                    f"{self._graph_api_url()}/{self.page_id}/feed",
                     params=params,
                     timeout=60,
                 )
@@ -707,6 +709,21 @@ class FacebookClient:
                 "error_message": None,
             }
 
+        except requests.exceptions.HTTPError as e:
+            response_detail = ""
+            if e.response is not None:
+                try:
+                    error_json = e.response.json()
+                    response_detail = str(error_json.get("error", error_json))[:1000]
+                except Exception:
+                    response_detail = e.response.text[:1000]
+            logger.error(f"Facebook API error: {response_detail}")
+            return {
+                "status": "failed",
+                "post_id": None,
+                "post_url": None,
+                "error_message": f"Facebook API error: {response_detail or str(e)}",
+            }
         except Exception as e:
             logger.error(f"Facebook post failed: {str(e)}")
             return {

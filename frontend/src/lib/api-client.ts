@@ -89,6 +89,7 @@ export const API_ENDPOINTS = {
     `${API_BASE_URL}/api/${API_VERSION}/rivals/${id}/snapshots`,
   RIVALS_INSIGHTS: `${API_BASE_URL}/api/${API_VERSION}/rivals/insights`,
   RIVALS_CONFIG: `${API_BASE_URL}/api/${API_VERSION}/rivals/config`,
+  META_AUTH: `${API_BASE_URL}/api/${API_VERSION}/auth/meta`,
 
   // Uploads
   UPLOADS: `${API_BASE_URL}/uploads`,

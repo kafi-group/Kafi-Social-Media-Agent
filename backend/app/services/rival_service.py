@@ -166,8 +166,8 @@ class RivalService:
 
     def needs_auto_refresh(self, rival: Rival) -> bool:
         """
-        True when cached snapshots are missing or YouTube stats are stale/empty
-        but we can now collect them (e.g. after OAuth was configured).
+        True when cached snapshots are missing or YouTube/Instagram stats are
+        stale/empty but we can now collect them (e.g. after OAuth was fixed).
         """
         latest = self.latest_snapshots(rival.id)
         if not latest:
@@ -176,21 +176,25 @@ class RivalService:
         has_yt_target = bool(
             (rival.youtube_channel_id or "").strip() or (rival.youtube_handle or "").strip()
         )
-        if not has_yt_target or not rival_collectors.youtube_is_configured():
-            return False
+        if has_yt_target and rival_collectors.youtube_is_configured():
+            yt = latest.get("youtube")
+            if yt is None:
+                return True
+            metrics = yt.metrics or {}
+            has_views = bool(metrics.get("total_views"))
+            has_subs = bool(metrics.get("subscribers"))
+            if yt.status != "ok" or (not has_views and not has_subs):
+                return True
 
-        yt = latest.get("youtube")
-        if yt is None:
-            return True
+        has_ig_target = bool((rival.instagram_username or "").strip())
+        if has_ig_target and rival_collectors.instagram_is_configured():
+            ig = latest.get("instagram")
+            if ig is None:
+                return True
+            metrics = ig.metrics or {}
+            if ig.status != "ok" or not metrics.get("followers"):
+                return True
 
-        metrics = yt.metrics or {}
-        has_views = bool(metrics.get("total_views"))
-        has_subs = bool(metrics.get("subscribers"))
-
-        if yt.status != "ok":
-            return True
-        if not has_views and not has_subs:
-            return True
         return False
 
     @staticmethod
@@ -214,7 +218,7 @@ class RivalService:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             list(pool.map(self.refresh_rival_isolated, stale_ids))
 
-        logger.info(f"Auto-refreshed {len(stale_ids)} rival(s) with stale YouTube data")
+        logger.info(f"Auto-refreshed {len(stale_ids)} rival(s) with stale analytics data")
         return len(stale_ids)
 
     def latest_snapshots(self, rival_id: int) -> dict[str, RivalSnapshot]:

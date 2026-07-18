@@ -249,6 +249,99 @@ def _youtube_recent_videos(
 # Instagram (Meta Graph business_discovery)
 # ---------------------------------------------------------------------------
 
+def instagram_is_configured() -> bool:
+    return bool(
+        settings.INSTAGRAM_ACCOUNT_ID.strip()
+        and settings.FACEBOOK_PAGE_ACCESS_TOKEN.strip()
+    )
+
+
+def _instagram_auth_error_message(err: dict) -> str | None:
+    """
+    Return a reconnect hint when Meta rejects the page token / app pairing.
+    These failures affect ALL rivals until OAuth is fixed — not individual usernames.
+    """
+    code = err.get("code")
+    msg = (err.get("message") or "").strip()
+    lower = msg.lower()
+
+    auth_signals = (
+        "cannot call api for app",
+        "invalid oauth",
+        "error validating access token",
+        "session has expired",
+        "access token has expired",
+        "permission denied",
+        "requires facebook login",
+        "pages_read_engagement",
+        "instagram_basic",
+        "instagram_manage_insights",
+    )
+    if code in (190, 102, 200, 10) or any(s in lower for s in auth_signals):
+        return (
+            "Meta Instagram token/app auth failed. Reconnect via /api/v1/auth/meta "
+            f"(need instagram_basic + instagram_manage_insights + pages_read_engagement). "
+            f"Meta said: {msg or 'OAuth/permission error'}"
+        )
+    return None
+
+
+def probe_instagram_auth(sample_username: str = "shanfoodsglobal") -> dict:
+    """
+    Lightweight health check for Rival Review Instagram config.
+    Uses business_discovery against a known public professional account.
+    """
+    ig_user_id = settings.INSTAGRAM_ACCOUNT_ID.strip()
+    token = settings.FACEBOOK_PAGE_ACCESS_TOKEN.strip()
+    version = settings.META_GRAPH_API_VERSION.strip() or "v18.0"
+
+    if not ig_user_id or not token:
+        return {
+            "ok": False,
+            "configured": False,
+            "message": (
+                "Set INSTAGRAM_ACCOUNT_ID and FACEBOOK_PAGE_ACCESS_TOKEN in backend .env, "
+                "then reconnect Meta OAuth."
+            ),
+        }
+
+    username = (sample_username or "instagram").strip().lstrip("@")
+    fields = f"business_discovery.username({username}){{followers_count,media_count}}"
+    try:
+        resp = requests.get(
+            f"https://graph.facebook.com/{version}/{ig_user_id}",
+            params={"fields": fields, "access_token": token},
+            timeout=min(15, settings.SCRAPER_TIMEOUT),
+        )
+        data = resp.json() if resp.content else {}
+        if resp.ok and isinstance(data, dict) and data.get("business_discovery"):
+            return {
+                "ok": True,
+                "configured": True,
+                "message": "Ready — Instagram Business Discovery can fetch rival stats.",
+            }
+
+        err = data.get("error", {}) if isinstance(data, dict) else {}
+        auth_msg = _instagram_auth_error_message(err) if isinstance(err, dict) else None
+        raw = err.get("message") if isinstance(err, dict) else None
+        return {
+            "ok": False,
+            "configured": True,
+            "message": auth_msg
+            or (
+                f"Instagram probe failed: {raw}"
+                if raw
+                else "Instagram Business Discovery probe failed."
+            ),
+        }
+    except requests.exceptions.RequestException as exc:
+        return {
+            "ok": False,
+            "configured": True,
+            "message": f"Instagram probe request failed: {exc}",
+        }
+
+
 def collect_instagram(rival) -> dict:
     """Public IG business/creator stats via Meta Graph business_discovery."""
     username = (rival.instagram_username or "").strip().lstrip("@")
@@ -284,11 +377,24 @@ def collect_instagram(rival) -> dict:
         data = resp.json()
         if not resp.ok:
             err = data.get("error", {}) if isinstance(data, dict) else {}
+            auth_msg = _instagram_auth_error_message(err) if isinstance(err, dict) else None
+            if auth_msg:
+                return _result("instagram", "error", message=auth_msg)
             msg = err.get("message", "Instagram Business Discovery request failed.")
-            # Most common cause: the rival isn't a discoverable Business/Creator account.
+            # Rival isn't a discoverable Business/Creator account, or username is wrong.
             return _result("instagram", "unavailable", message=msg)
 
         bd = data.get("business_discovery", {})
+        if not bd:
+            return _result(
+                "instagram",
+                "unavailable",
+                message=(
+                    f"No Instagram business_discovery data for @{username}. "
+                    "Confirm the username is a public Business/Creator account."
+                ),
+            )
+
         media = bd.get("media", {}).get("data", [])
         recent_items = [{
             "caption": (m.get("caption") or "")[:200],
