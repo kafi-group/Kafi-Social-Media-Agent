@@ -36,6 +36,17 @@ MANAGED_KEYS = frozenset(
     }
 )
 
+# Tokens should win from DB/OAuth so redeploys keep the last successful connect.
+# Account IDs prefer Railway/.env when set — otherwise an old DB PAGE_ID can
+# permanently override a corrected FACEBOOK_PAGE_ID on every startup.
+ENV_PREFERRED_KEYS = frozenset(
+    {
+        "FACEBOOK_PAGE_ID",
+        "INSTAGRAM_ACCOUNT_ID",
+        "YOUTUBE_CHANNEL_ID",
+    }
+)
+
 
 def _quote_env_value(value: str) -> str:
     if re.search(r'[\s#"\'\\]', value):
@@ -207,14 +218,18 @@ def load_persisted_credentials() -> list[str]:
     for key, value in merged.items():
         if not hasattr(settings, key):
             continue
-        current = getattr(settings, key) or ""
-        # Prefer persisted store when present — keeps Railway redeploys in sync
-        # with the last successful OAuth / auto-refresh.
-        if value and value != current:
-            setattr(settings, key, value)
-            applied.append(key)
-        elif value and not current:
-            setattr(settings, key, value)
+        current = (getattr(settings, key) or "").strip()
+        stored = (value or "").strip()
+        if not stored:
+            continue
+
+        # Railway/.env account IDs win when present so ops can correct PAGE_ID
+        # without fighting stale rows in platform_credential.
+        if key in ENV_PREFERRED_KEYS and current:
+            continue
+
+        if stored != current:
+            setattr(settings, key, stored)
             applied.append(key)
 
     if applied:

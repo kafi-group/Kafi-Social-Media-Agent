@@ -248,13 +248,42 @@ async def meta_auth_callback(
             "to receive a non-expiring Page token for Facebook and Instagram."
         )
 
+    # If we fell back to a different managed page, adopt its ID for IG lookup + persist.
+    resolved_page_id = (settings.FACEBOOK_PAGE_ID or "").strip()
+    if page_token and managed_pages:
+        configured = resolved_page_id
+        matched = next(
+            (
+                str(p.get("id") or "").strip()
+                for p in managed_pages
+                if (p.get("access_token") or "").strip() == page_token
+                or (configured and str(p.get("id")) == configured)
+            ),
+            "",
+        )
+        if not matched:
+            # Token came from fallback page — prefer that page's id from the note/name match
+            for p in managed_pages:
+                if (p.get("access_token") or "").strip() and str(p.get("name")) == page_name:
+                    matched = str(p.get("id") or "").strip()
+                    break
+            if not matched:
+                for p in managed_pages:
+                    if (p.get("access_token") or "").strip():
+                        matched = str(p.get("id") or "").strip()
+                        break
+        if matched:
+            resolved_page_id = matched
+            settings.FACEBOOK_PAGE_ID = matched
+
     ig_id = ""
     if page_token:
-        ig_id = resolve_instagram_account_id(page_token, settings.FACEBOOK_PAGE_ID)
+        ig_id = resolve_instagram_account_id(page_token, resolved_page_id)
 
     saved_keys = persist_meta_tokens(
         page_token=page_token or "",
         user_token=long_lived_user_token,
+        page_id=resolved_page_id if page_token else "",
         instagram_account_id=ig_id,
     )
     # If only the user token could be obtained, still persist it for later refresh.

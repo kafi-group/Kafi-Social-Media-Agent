@@ -101,12 +101,31 @@ def fetch_page_access_token(
                 token = (page.get("access_token") or "").strip()
                 if token:
                     return token, page.get("name", "your page"), ""
+            pages = accounts_resp.json().get("data", []) or []
             if page_id:
+                # Configured ID missing from me/accounts — fall back to first
+                # managed page so reconnect still yields a usable Page token.
+                for page in pages:
+                    token = (page.get("access_token") or "").strip()
+                    if token:
+                        return (
+                            token,
+                            page.get("name", "your page"),
+                            (
+                                f"No managed page matched FACEBOOK_PAGE_ID={page_id}. "
+                                f"Using '{page.get('name')}' ({page.get('id')}) instead — "
+                                "update FACEBOOK_PAGE_ID on Railway to this ID."
+                            ),
+                        )
                 return (
                     "",
                     "",
                     f"No managed page matched FACEBOOK_PAGE_ID={page_id}.",
                 )
+            for page in pages:
+                token = (page.get("access_token") or "").strip()
+                if token:
+                    return token, page.get("name", "your page"), ""
     except requests.RequestException as exc:
         logger.warning(f"me/accounts page token fetch error: {exc}")
 
