@@ -9,6 +9,7 @@ POST /creation/generate-voice  - edge-tts voice-over (free)
 from fastapi import APIRouter, HTTPException, Request
 
 from app.config import (
+    _cloudflare_image_ready,
     get_creation_gemini_api_keys,
     get_creation_gemini_models,
     get_image_generation_model_label,
@@ -87,9 +88,9 @@ async def list_creation_models():
         image_model=get_image_generation_model_label() if image_ready else "",
         image_provider=resolve_image_provider(),
         image_provider_configured=settings.IMAGE_PROVIDER,
-        cloudflare_configured=bool(
-            settings.CLOUDFLARE_ACCOUNT_ID.strip() and settings.CLOUDFLARE_API_TOKEN.strip()
-        ),
+        cloudflare_configured=_cloudflare_image_ready(),
+        # Dedicated paid image key only — creation/chat keys do not count as "Gemini images ready".
+        gemini_image_configured=bool(settings.STUDIO_IMAGE_GEMINI_API_KEY.strip()),
         creation_api_keys_loaded=len(get_creation_gemini_api_keys()),
         voice_ready=True,
         voice_moods=list_voice_moods(),
@@ -210,19 +211,20 @@ async def creation_generate_image(request: Request, body: ImageGenerateRequest):
     """Generate a product image via IMAGE_PROVIDER (gemini, modelslab, or cloudflare)."""
     try:
         prompt = extract_image_prompt(body.prompt)
-        result = generate_image(prompt)
+        preferred = (body.provider or "").strip().lower() or None
+        result = generate_image(prompt, preferred_provider=preferred)
         return ImageGenerateResponse(
             media_path=result["media_path"],
             media_url=_resolve_media_url(result["media_url"], request),
             model=result["model"],
-            provider=result.get("provider") or resolve_image_provider(),
+            provider=result.get("provider") or preferred or resolve_image_provider(),
             fallback_reason=result.get("fallback_reason"),
             caption=result.get("caption"),
         )
     except ContentGenerationError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except LLMConnectionError as e:
-        provider = resolve_image_provider()
+        provider = (body.provider or "").strip().lower() or resolve_image_provider()
         logger.error(f"Image generation error (provider={provider}): {e}")
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:

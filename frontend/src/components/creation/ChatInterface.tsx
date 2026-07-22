@@ -78,6 +78,17 @@ const CREATION_MODES: {
 ];
 
 const GEMINI_WEB_FALLBACK_URL = 'https://gemini.google.com/app';
+const IMAGE_PROVIDER_PREF_KEY = 'creation_image_provider';
+type ImageProviderChoice = 'cloudflare' | 'gemini';
+
+const GEMINI_PAID_API_MSG =
+  'Paid API not connected yet. Switch image provider to Cloudflare to generate images.';
+
+function readStoredImageProvider(): ImageProviderChoice {
+  if (typeof window === 'undefined') return 'cloudflare';
+  const raw = window.localStorage.getItem(IMAGE_PROVIDER_PREF_KEY);
+  return raw === 'gemini' ? 'gemini' : 'cloudflare';
+}
 const GOOGLE_FLOW_FALLBACK_URL = 'https://labs.google/fx/tools/flow';
 
 const MAX_REFERENCE_IMAGE_BYTES = 4 * 1024 * 1024;
@@ -187,6 +198,11 @@ export default function ChatInterface() {
   const [chatReady, setChatReady] = useState<boolean>(true);
   const [imageReady, setImageReady] = useState<boolean>(false);
   const [imageModelLabel, setImageModelLabel] = useState<string>('');
+  const [cloudflareConfigured, setCloudflareConfigured] = useState<boolean>(false);
+  const [geminiImageConfigured, setGeminiImageConfigured] = useState<boolean>(false);
+  const [imageProvider, setImageProvider] = useState<ImageProviderChoice>(() =>
+    readStoredImageProvider()
+  );
   const [voiceMoods, setVoiceMoods] = useState<{ id: string; label: string }[]>([]);
   const [voiceMood, setVoiceMood] = useState<string>('professional');
   const [creationLanguage, setCreationLanguage] = useState<string>(() => readStoredCreationLanguage());
@@ -243,6 +259,8 @@ export default function ChatInterface() {
   const refreshCreationCapabilities = React.useCallback(async (): Promise<{
     imageReady: boolean;
     imageModel: string;
+    cloudflareConfigured: boolean;
+    geminiImageConfigured: boolean;
   }> => {
     try {
       const res = await fetchWithTimeout(API_ENDPOINTS.CREATION_MODELS);
@@ -252,19 +270,43 @@ export default function ChatInterface() {
       setGeminiWebUrl(data.gemini_web_url || GEMINI_WEB_FALLBACK_URL);
       setGoogleFlowUrl(GOOGLE_FLOW_FALLBACK_URL);
       setChatReady(data.chat_ready);
-      const ready = Boolean(data.image_ready);
+      const cfReady = Boolean(data.cloudflare_configured);
+      const geminiReady = Boolean(data.gemini_image_configured);
       const imageModel = data.image_model ?? '';
+      setCloudflareConfigured(cfReady);
+      setGeminiImageConfigured(geminiReady);
+      // Cloudflare must be configured to enable generation. Gemini stays clickable
+      // so the UI can show "Paid API not connected yet" when no key is present.
+      const ready = imageProvider === 'cloudflare' ? cfReady : true;
       setImageReady(ready);
-      setImageModelLabel(imageModel);
+      setImageModelLabel(
+        imageProvider === 'cloudflare'
+          ? cfReady
+            ? 'Cloudflare Flux'
+            : 'Cloudflare (not configured)'
+          : geminiReady
+            ? imageModel || 'Gemini'
+            : 'Gemini (paid API not connected)'
+      );
       setVoiceMoods(data.voice_moods ?? []);
       if (data.languages?.length) {
         setLanguageOptions(data.languages);
       }
-      return { imageReady: ready, imageModel };
+      return {
+        imageReady: ready,
+        imageModel,
+        cloudflareConfigured: cfReady,
+        geminiImageConfigured: geminiReady,
+      };
     } catch {
-      return { imageReady: false, imageModel: '' };
+      return {
+        imageReady: false,
+        imageModel: '',
+        cloudflareConfigured: false,
+        geminiImageConfigured: false,
+      };
     }
-  }, []);
+  }, [imageProvider]);
 
   const imageNotReadyMessage = (imageModel: string) => {
     const backend = API_CONFIG.baseURL;
@@ -348,18 +390,7 @@ export default function ChatInterface() {
       setMessages((prev) => [...prev, assistantMsg]);
 
       if (creationIntent === 'create_image') {
-        const { imageReady: ready, imageModel } = await refreshCreationCapabilities();
-        if (ready) {
-          void runGenerateImage(assistantIndex, data.reply);
-        } else {
-          const configMsg = imageNotReadyMessage(imageModel);
-          setMessages((prev) =>
-            prev.map((m, i) =>
-              i === assistantIndex ? { ...m, imageGenerationError: configMsg } : m
-            )
-          );
-          toast.error(configMsg);
-        }
+        void runGenerateImage(assistantIndex, data.reply);
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Chat request failed';
@@ -425,9 +456,24 @@ export default function ChatInterface() {
   };
 
   const runGenerateImage = async (index: number, promptText: string) => {
-    const { imageReady: ready, imageModel } = await refreshCreationCapabilities();
-    if (!ready) {
-      const configMsg = imageNotReadyMessage(imageModel);
+    // Gemini image is a paid path — keep the UI switchable, but block until
+    // STUDIO_IMAGE_GEMINI_API_KEY is configured on the backend.
+    if (imageProvider === 'gemini') {
+      const caps = await refreshCreationCapabilities();
+      if (!caps.geminiImageConfigured) {
+        toast.error(GEMINI_PAID_API_MSG);
+        setMessages((prev) =>
+          prev.map((m, i) =>
+            i === index ? { ...m, imageGenerationError: GEMINI_PAID_API_MSG } : m
+          )
+        );
+        return;
+      }
+    }
+
+    const caps = await refreshCreationCapabilities();
+    if (imageProvider === 'cloudflare' && !caps.cloudflareConfigured) {
+      const configMsg = imageNotReadyMessage(caps.imageModel || 'Cloudflare Flux');
       toast.error(configMsg);
       setMessages((prev) =>
         prev.map((m, i) => (i === index ? { ...m, imageGenerationError: configMsg } : m))
@@ -440,7 +486,7 @@ export default function ChatInterface() {
       const res = await apiFetch(API_ENDPOINTS.CREATION_GENERATE_IMAGE, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: promptText }),
+        body: JSON.stringify({ prompt: promptText, provider: imageProvider }),
         signal: AbortSignal.timeout(API_CONFIG.timeout),
       });
       if (!res.ok) {
@@ -457,7 +503,7 @@ export default function ChatInterface() {
             ? {
                 ...m,
                 generatedImageUrl: data.media_url,
-                generatedImageProvider: data.provider || null,
+                generatedImageProvider: data.provider || imageProvider,
                 generatedImageModel: data.model || null,
                 generatedImageFallbackReason: data.fallback_reason || null,
                 imageGenerationError: null,
@@ -629,9 +675,30 @@ export default function ChatInterface() {
             </option>
           ))}
         </select>
+        <select
+          value={imageProvider}
+          onChange={(e) => {
+            const next = e.target.value === 'gemini' ? 'gemini' : 'cloudflare';
+            setImageProvider(next);
+            if (typeof window !== 'undefined') {
+              window.localStorage.setItem(IMAGE_PROVIDER_PREF_KEY, next);
+            }
+          }}
+          className="shrink-0 text-sm rounded-lg border border-brand-200 bg-white px-2 py-1.5 text-brand-800 dark:bg-slate-700 dark:border-slate-500 dark:text-slate-100"
+          title="Image generation provider"
+        >
+          <option value="cloudflare">
+            Images: Cloudflare{cloudflareConfigured ? '' : ' (setup needed)'}
+          </option>
+          <option value="gemini">
+            Images: Gemini{geminiImageConfigured ? '' : ' (paid API)'}
+          </option>
+        </select>
         {imageModelLabel ? (
           <span className="text-xs text-slate-500 bg-slate-50 rounded-lg px-2 py-1 shrink-0 dark:bg-slate-700/60 dark:text-slate-300">
-            Images: {imageModelLabel}
+            {imageProvider === 'gemini' && !geminiImageConfigured
+              ? 'Paid API not connected'
+              : imageModelLabel}
           </span>
         ) : null}
 

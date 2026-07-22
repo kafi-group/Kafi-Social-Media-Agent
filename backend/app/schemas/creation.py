@@ -136,6 +136,7 @@ class CreationModelsResponse(BaseModel):
     image_provider: str = ""
     image_provider_configured: str = ""
     cloudflare_configured: bool = False
+    gemini_image_configured: bool = False
     creation_api_keys_loaded: int = 0
     voice_ready: bool = True
     voice_moods: list[dict[str, str]] = Field(default_factory=list)
@@ -146,6 +147,10 @@ class ImageGenerateRequest(BaseModel):
     """Generate an image from prompt text (usually extracted from chat reply)."""
 
     prompt: str = Field(..., min_length=3, max_length=4000)
+    provider: Optional[str] = Field(
+        default=None,
+        description="Optional override: cloudflare | gemini | modelslab. Defaults to IMAGE_PROVIDER.",
+    )
 
 
 class ImageGenerateResponse(BaseModel):

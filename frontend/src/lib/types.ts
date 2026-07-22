@@ -427,6 +427,7 @@ export interface CreationModelsResponse {
   image_model?: string;
   image_provider?: string;
   cloudflare_configured?: boolean;
+  gemini_image_configured?: boolean;
   voice_ready?: boolean;
   voice_moods?: { id: string; label: string }[];
   languages?: { code: string; label: string; speech_lang: string }[];

@@ -112,11 +112,39 @@ def _cloudflare_result(prompt: str, *, reason: str) -> dict:
     return result
 
 
-def generate_image(prompt: str) -> dict:
-    """Generate an image using IMAGE_PROVIDER (default: gemini-first)."""
-    provider = resolve_image_provider()
+def generate_image(prompt: str, preferred_provider: str | None = None) -> dict:
+    """Generate an image using IMAGE_PROVIDER, or an explicit preferred_provider override."""
+    override = (preferred_provider or "").strip().lower()
+    provider = override or resolve_image_provider()
+
+    # Explicit UI selection: Gemini without a dedicated paid image key.
+    if provider == "gemini" and not (settings.STUDIO_IMAGE_GEMINI_API_KEY or "").strip():
+        raise LLMConnectionError(
+            "Paid API not connected yet. Gemini image generation requires "
+            "STUDIO_IMAGE_GEMINI_API_KEY. Switch the image provider to Cloudflare "
+            "to generate images."
+        )
+
+    if provider == "cloudflare":
+        if not _cloudflare_image_ready():
+            raise LLMConnectionError(
+                "Cloudflare image generation is not configured. "
+                "Set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN."
+            )
+        result = generate_cloudflare_image(prompt)
+        result["provider"] = "cloudflare"
+        result["fallback_reason"] = None
+        return result
 
     if provider == "gemini":
+        # Explicit Gemini selection: do not silently fall back to Cloudflare.
+        if override == "gemini":
+            result = generate_gemini_image(prompt)
+            result["provider"] = "gemini"
+            result["fallback_reason"] = None
+            _increment_gemini_daily_count()
+            return result
+
         limit = _gemini_priority_limit()
         day, used = _read_gemini_daily_count()
         cloudflare_ready = _cloudflare_image_ready()
@@ -159,15 +187,10 @@ def generate_image(prompt: str) -> dict:
         result = generate_modelslab_image(prompt)
         result["provider"] = result.get("provider") or "modelslab"
         return result
-    if provider == "cloudflare":
-        result = generate_cloudflare_image(prompt)
-        result["provider"] = "cloudflare"
-        return result
 
     raise LLMConnectionError(
         f"Image provider '{provider}' is not supported. "
-        "Set IMAGE_PROVIDER=gemini and ensure STUDIO_IMAGE_GEMINI_API_KEY "
-        "(or CREATION_GEMINI_API_KEY) is set."
+        "Set IMAGE_PROVIDER=gemini|cloudflare|modelslab, or pick a provider in Prompt Studio."
     )
 
 
