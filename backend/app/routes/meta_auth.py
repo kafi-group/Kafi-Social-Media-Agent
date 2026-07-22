@@ -46,11 +46,25 @@ REQUIRED_SCOPES = [
     "instagram_content_publish",
     "pages_manage_posts",
     "pages_manage_engagement",
+    # Required for Pages owned under Meta Business Manager; without it
+    # /me/accounts often returns [] even when the user is a Page admin.
+    "business_management",
 ]
 
 
 def _list_managed_pages(long_lived_user_token: str) -> list[dict]:
     graph_url = f"https://graph.facebook.com/{settings.META_GRAPH_API_VERSION}"
+    pages: list[dict] = []
+    seen: set[str] = set()
+
+    def _extend(items: list) -> None:
+        for page in items:
+            page_id = str(page.get("id") or "").strip()
+            if not page_id or page_id in seen:
+                continue
+            seen.add(page_id)
+            pages.append(page)
+
     try:
         accounts_resp = requests.get(
             f"{graph_url}/me/accounts",
@@ -62,19 +76,56 @@ def _list_managed_pages(long_lived_user_token: str) -> list[dict]:
             timeout=30,
         )
         if accounts_resp.ok:
-            return accounts_resp.json().get("data", []) or []
+            _extend(accounts_resp.json().get("data", []) or [])
+        else:
+            logger.warning(f"me/accounts listing failed: {accounts_resp.text[:300]}")
     except requests.RequestException as exc:
         logger.warning(f"me/accounts listing failed: {exc}")
-    return []
+
+    # Business-assigned Pages often missing from /me/accounts without this path.
+    try:
+        assigned_resp = requests.get(
+            f"{graph_url}/me/assigned_pages",
+            params={
+                "fields": "id,name,access_token,instagram_business_account{id,username,name}",
+                "access_token": long_lived_user_token,
+                "limit": 50,
+            },
+            timeout=30,
+        )
+        if assigned_resp.ok:
+            _extend(assigned_resp.json().get("data", []) or [])
+        else:
+            logger.info(f"me/assigned_pages unavailable: {assigned_resp.text[:200]}")
+    except requests.RequestException as exc:
+        logger.info(f"me/assigned_pages listing failed: {exc}")
+
+    return pages
 
 
 def _format_managed_pages_html(pages: list[dict], current_page_id: str) -> str:
+    configured = (current_page_id or "").strip()
     if not pages:
-        return ""
+        return f"""
+          <h3 style="color:#b45309">No Facebook Pages returned for this login</h3>
+          <p>
+            Meta did <strong>not</strong> return any Pages for the Facebook user you just
+            authorized. The ID below is only what is <strong>already saved on the server</strong>
+            (often an old Page) — it is <strong>not</strong> a newly connected Page:
+          </p>
+          <p><code>FACEBOOK_PAGE_ID={configured or "(not set)"}</code></p>
+          <ol>
+            <li>Log into Facebook as an <strong>Admin</strong> of the Kafi Essence Page</li>
+            <li>During the permission screen, <strong>select the Kafi Essence Page</strong> (and its IG)</li>
+            <li>Approve <strong>business_management</strong> if Meta asks (needed for Business-owned Pages)</li>
+            <li>Set Railway <code>FACEBOOK_PAGE_ID</code> to the real Kafi Essence Page ID, then reconnect</li>
+          </ol>
+        """
+
     rows = []
     for page in pages:
         page_id = str(page.get("id", ""))
-        is_current = page_id == current_page_id.strip()
+        is_current = page_id == configured
         ig = page.get("instagram_business_account") or {}
         ig_line = ""
         if isinstance(ig, dict) and ig.get("id"):
@@ -83,17 +134,21 @@ def _format_managed_pages_html(pages: list[dict], current_page_id: str) -> str:
                 f"<br>Instagram: @{ig_user} "
                 f"(<code>INSTAGRAM_ACCOUNT_ID={ig.get('id')}</code>)"
             )
-        marker = " <strong>← currently configured</strong>" if is_current else ""
+        marker = " <strong>← currently configured on server</strong>" if is_current else ""
         rows.append(
             f"<li><strong>{page.get('name', 'Page')}</strong>{marker}<br>"
             f"<code>FACEBOOK_PAGE_ID={page_id}</code>{ig_line}</li>"
         )
     return f"""
-          <h3>All Facebook Pages you manage</h3>
-          <p>Confirm your <strong>production</strong> page ID is set in the environment:</p>
+          <h3>Facebook Pages Meta returned for THIS login</h3>
+          <p>
+            Pick the <strong>Kafi Essence</strong> row. Put that ID in Railway
+            <code>FACEBOOK_PAGE_ID</code>, then run <code>/api/v1/auth/meta</code> again.
+            The old configured value on the server is
+            <code>{configured or "(not set)"}</code> — ignore it unless it matches Kafi Essence.
+          </p>
           <ul>{''.join(rows)}</ul>
     """
-
 
 def _format_expiry(debug_data: dict) -> str:
     expires_at = debug_data.get("expires_at")
@@ -244,8 +299,10 @@ async def meta_auth_callback(
         token_label = "Long-lived USER token (~60 days — Page token missing)"
         token_note = (
             (page_token_note or "Could not fetch a Page token.")
-            + "<br><strong>Set FACEBOOK_PAGE_ID in .env before re-authorizing</strong> "
-            "to receive a non-expiring Page token for Facebook and Instagram."
+            + "<br><strong>This does not mean Meta connected the old Page.</strong> "
+            "It means the server still has an old <code>FACEBOOK_PAGE_ID</code>, and "
+            "this Facebook login did not return a usable Page token for Kafi Essence. "
+            "See the Pages section below, update Railway, then reconnect."
         )
 
     # If we fell back to a different managed page, adopt its ID for IG lookup + persist.
